@@ -13,6 +13,7 @@ from .config.models import VirtualLight
 from .config.store import ConfigStore
 from .const import CONFIG_FILENAME
 from .discovery.ssdp import SSDPServer
+from .emulator.inbound import InboundStreamer
 from .emulator.pairing import PairingManager
 from .emulator.rest_v1 import HueV1Emulator
 from .engine.engine import Engine
@@ -52,6 +53,7 @@ class BridgeApp:
         self._http_port_override = http_port
         self._shutdown = asyncio.Event()
         self._engine: Engine | None = None
+        self._inbound: InboundStreamer | None = None
         self._ssdp: SSDPServer | None = None
         self._runner: web.AppRunner | None = None
         self._web_runner: web.AppRunner | None = None
@@ -77,9 +79,10 @@ class BridgeApp:
 
         engine = Engine(self._store)
         self._engine = engine
+        pairing = PairingManager(self._store)
         emulator = HueV1Emulator(
             store=self._store,
-            pairing=PairingManager(self._store),
+            pairing=pairing,
             host_ip=host_ip,
             mac=mac,
             engine=engine,
@@ -107,6 +110,11 @@ class BridgeApp:
         await web.TCPSite(web_runner, host="0.0.0.0", port=web_port).start()
         LOGGER.info("Web configuration UI on http://%s:%d", host_ip, web_port)
 
+        if config.virtual_bridge.enable_inbound_dtls:
+            inbound = InboundStreamer(store=self._store, pairing=pairing, engine=engine)
+            self._inbound = inbound
+            await inbound.start()
+
         LOGGER.info(
             "%s ready - bridge id %s, %d virtual light(s)",
             config.virtual_bridge.name,
@@ -115,7 +123,10 @@ class BridgeApp:
         )
 
     async def stop(self) -> None:
-        """Stop the outbound stream, the web UI, the SSDP responder and the HTTP API."""
+        """Stop inbound streaming, the outbound stream, the web UI, SSDP and the HTTP API."""
+        if self._inbound is not None:
+            await self._inbound.stop()
+            self._inbound = None
         if self._engine is not None:
             await self._engine.stop()
             self._engine = None

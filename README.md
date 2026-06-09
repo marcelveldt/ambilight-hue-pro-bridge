@@ -5,10 +5,10 @@ the new **Hue Pro bridge** — over the low-latency **Entertainment API**, with 
 for **multi-zone / gradient lights**.
 
 > [!WARNING]
-> **Status: early development.** The virtual bridge (SSDP discovery, pairing, v1 REST API)
-> and the outbound Entertainment streaming engine work; the web UI, the inbound DTLS path
-> for newer TVs, and packaging are still to come, and the TV-side wire protocol still needs
-> verification against a real TV. See [Roadmap](#roadmap).
+> **Status: early development.** The virtual bridge (SSDP discovery, pairing, v1 REST API),
+> the web configuration UI, the outbound Entertainment streaming engine, and the inbound
+> DTLS path for newer TVs all work; packaging is still to come, and the TV-side wire
+> protocol still needs verification against a real TV. See [Roadmap](#roadmap).
 
 ## Why this exists
 
@@ -119,12 +119,12 @@ project follows the conventions of [aiohue](https://github.com/home-assistant-li
 
 ## Roadmap
 
-- [x] Hue Entertainment streaming client (extracted to [music-assistant/hue-entertainment](https://github.com/music-assistant/hue-entertainment))
+- [x] Hue Entertainment streaming client — the shared [music-assistant/hue-entertainment](https://github.com/music-assistant/hue-entertainment) library
 - [x] Virtual bridge: SSDP/UPnP discovery + legacy v1 REST emulation + pairing
 - [x] Outbound engine: v1 state → RGB, ingest buffer, channel mapping, on-demand streaming
 - [ ] Verify the TV ↔ bridge wire protocol against a real TV (capture via the request log)
-- [x] Web configuration UI — bridge pairing + entertainment-area selection
-- [ ] Inbound DTLS server (UDP 2100) for newer Android Ambilight TVs
+- [x] Web configuration UI — bridge discovery + pairing + entertainment-area selection
+- [x] Inbound DTLS server (UDP 2100) for newer Android Ambilight TVs (pure-Python DTLS-PSK)
 - [ ] Web UI: gradient / light → channel mapping (channels are config-file only for now)
 - [ ] Docker image (multi-arch)
 - [ ] Home Assistant OS add-on

@@ -45,7 +45,8 @@ class VirtualBridge:
     mac: str | None = None
     http_port: int = DEFAULT_HTTP_PORT
     web_port: int = DEFAULT_WEB_UI_PORT
-    enable_inbound_dtls: bool = False
+    # Listen for newer (Android) TVs that stream entertainment over inbound DTLS (UDP 2100).
+    enable_inbound_dtls: bool = True
 
 
 @dataclass

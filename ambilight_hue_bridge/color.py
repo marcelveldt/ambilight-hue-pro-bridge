@@ -41,6 +41,23 @@ def state_to_rgb16(state: dict[str, Any]) -> tuple[int, int, int]:
     )
 
 
+def xy_brightness_to_rgb16(x: float, y: float, brightness: float) -> tuple[int, int, int]:
+    """
+    Convert a CIE xy chromaticity plus brightness to 16-bit RGB.
+
+    :param x: CIE x chromaticity (0-1).
+    :param y: CIE y chromaticity (0-1).
+    :param brightness: Relative brightness (0-1).
+    """
+    red, green, blue = _xy_to_rgb(x, y)
+    level = _clamp01(brightness)
+    return (
+        round(red * level * _RGB_MAX),
+        round(green * level * _RGB_MAX),
+        round(blue * level * _RGB_MAX),
+    )
+
+
 def _clamp01(value: float) -> float:
     """Clamp a value to the 0.0-1.0 range."""
     return max(0.0, min(1.0, value))
