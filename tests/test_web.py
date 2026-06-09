@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from hue_entertainment import DiscoveredBridge
 
 from ambilight_hue_bridge.config.store import ConfigStore
 from ambilight_hue_bridge.web.server import WebServer
@@ -57,6 +58,21 @@ async def test_pair_adds_and_activates_bridge(aiohttp_client, web_setup, monkeyp
     assert data["active"] is True
     assert store.config.active_real_bridge == data["id"]
     assert any(bridge.host == "192.168.1.5" for bridge in store.config.real_bridges)
+
+
+async def test_discover_lists_bridges(aiohttp_client, web_setup, monkeypatch) -> None:
+    """The discover endpoint returns bridges found via mDNS."""
+    app, _store = web_setup
+
+    async def fake_discover() -> list[DiscoveredBridge]:
+        """Return one fake discovered bridge without touching the network."""
+        return [DiscoveredBridge(id="ABC", host="192.168.1.9", name="hue.local")]
+
+    monkeypatch.setattr("ambilight_hue_bridge.web.server.discover_bridges", fake_discover)
+    client = await aiohttp_client(app)
+    found = await (await client.get("/api/discover")).json()
+    assert found[0]["host"] == "192.168.1.9"
+    assert found[0]["id"] == "ABC"
 
 
 async def test_pair_requires_host(aiohttp_client, web_setup) -> None:

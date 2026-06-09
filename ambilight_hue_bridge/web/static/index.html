@@ -35,16 +35,18 @@
 
   <h2>Hue bridges</h2>
   <p class="muted">
-    Pair the real Hue bridge to stream to. Press the link button on the bridge, enter its
-    IP address, then click <em>Pair</em>.
+    Pair the real Hue bridge to stream to. Click <em>Discover</em> to find bridges on your
+    network (or type the IP), press the link button on the bridge, then click <em>Pair</em>.
   </p>
 
   <div class="card">
     <div class="row">
       <input id="host" type="text" placeholder="192.168.1.50" size="16" />
       <button class="primary" id="pair-btn" onclick="pair()">Pair</button>
+      <button id="discover-btn" onclick="discover()">Discover</button>
       <span class="muted" id="pair-status"></span>
     </div>
+    <div id="discovered" class="row" style="margin-top:.5rem"></div>
   </div>
 
   <div id="bridges"></div>
@@ -176,6 +178,29 @@ async function pair() {
   } catch (e) {
     status.className = "error";
     status.textContent = "Pairing failed: " + (e.message || e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function discover() {
+  const btn = document.getElementById("discover-btn");
+  const out = document.getElementById("discovered");
+  btn.disabled = true;
+  out.innerHTML = '<span class="muted">Searching for bridges… (a few seconds)</span>';
+  try {
+    const found = await api("/api/discover");
+    if (!found.length) { out.innerHTML = '<span class="muted">No bridges found.</span>'; return; }
+    out.innerHTML = "";
+    for (const b of found) {
+      const chip = document.createElement("button");
+      chip.textContent = b.host + (b.id ? ` (${b.id})` : "");
+      chip.title = "Use this bridge";
+      chip.onclick = () => { document.getElementById("host").value = b.host; };
+      out.appendChild(chip);
+    }
+  } catch (e) {
+    out.innerHTML = `<span class="error">${e.message || e}</span>`;
   } finally {
     btn.disabled = false;
   }

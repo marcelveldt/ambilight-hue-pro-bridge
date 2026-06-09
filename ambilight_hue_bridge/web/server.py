@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import aiohttp
 from aiohttp import web
+from hue_entertainment import discover_bridges
 
 from ambilight_hue_bridge.identity import bridge_id
 from ambilight_hue_bridge.outbound.controller import list_areas, pair_and_store
@@ -54,6 +55,7 @@ class WebServer:
             [
                 web.get("/", self._handle_index),
                 web.get("/api/status", self._handle_status),
+                web.get("/api/discover", self._handle_discover),
                 web.get("/api/bridges", self._handle_bridges),
                 web.post("/api/bridges/pair", self._handle_pair),
                 web.get("/api/bridges/{bridge_id}/areas", self._handle_areas),
@@ -88,6 +90,16 @@ class WebServer:
                     for light in config.virtual_lights
                 ],
             },
+        )
+
+    async def _handle_discover(self, _request: web.Request) -> web.StreamResponse:
+        """Discover Hue bridges on the local network via mDNS."""
+        try:
+            found = await discover_bridges()
+        except OSError as err:
+            return web.json_response({"error": str(err)}, status=502)
+        return web.json_response(
+            [{"id": bridge.id, "host": bridge.host, "name": bridge.name} for bridge in found],
         )
 
     async def _handle_bridges(self, _request: web.Request) -> web.StreamResponse:
