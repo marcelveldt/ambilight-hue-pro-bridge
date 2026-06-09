@@ -11,10 +11,9 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from .app import BridgeApp
-from .config.models import RealBridge
 from .config.store import ConfigStore
 from .const import CONFIG_FILENAME, DEFAULT_DATA_DIR, DISPLAY_NAME, PACKAGE_NAME
-from .outbound.controller import list_areas, pair_bridge
+from .outbound.controller import active_bridge, list_areas, pair_and_store
 
 LOGGER = logging.getLogger(PACKAGE_NAME)
 
@@ -92,12 +91,9 @@ async def _serve(data_dir: Path, http_port: int | None) -> None:
 async def _pair(data_dir: Path, host: str) -> None:
     """Pair with a real Hue bridge and store the credentials in the config."""
     print(f"Press the link button on the Hue bridge at {host} (waiting up to 30s)...")
-    creds = await pair_bridge(host)
     store = ConfigStore(data_dir / CONFIG_FILENAME)
     store.load()
-    bridge = _upsert_bridge(store, host, creds)
-    store.config.active_real_bridge = bridge.id
-    store.save()
+    bridge = await pair_and_store(store, host)
     config_path = data_dir / CONFIG_FILENAME
     print(f"Paired bridge '{bridge.id}' at {host}.")
     print(f"Next: run 'areas', then edit 'entertainment_area' and 'channels' in {config_path}.")
@@ -107,7 +103,7 @@ async def _areas(data_dir: Path) -> None:
     """List the entertainment areas (and their channels) on the configured bridge."""
     store = ConfigStore(data_dir / CONFIG_FILENAME)
     store.load()
-    bridge = _active_bridge(store)
+    bridge = active_bridge(store)
     if bridge is None:
         print("No paired bridge configured. Run 'pair <host>' first.")
         return
@@ -119,34 +115,6 @@ async def _areas(data_dir: Path) -> None:
         print(f"Area {area.id}  '{area.name}'  ({len(area.channels)} channels)")
         for channel in area.channels:
             print(f"    channel {channel.channel_id}: {channel.service_id}  pos={channel.position}")
-
-
-def _upsert_bridge(store: ConfigStore, host: str, creds: dict[str, str]) -> RealBridge:
-    """Add or update a real bridge entry with freshly paired credentials."""
-    for bridge in store.config.real_bridges:
-        if bridge.host == host:
-            bridge.app_key = creds["username"]
-            bridge.client_key = creds["clientkey"]
-            return bridge
-    bridge = RealBridge(
-        id=host.replace(".", "-"),
-        host=host,
-        app_key=creds["username"],
-        client_key=creds["clientkey"],
-    )
-    store.config.real_bridges.append(bridge)
-    return bridge
-
-
-def _active_bridge(store: ConfigStore) -> RealBridge | None:
-    """Return the configured active real bridge (or the first one)."""
-    bridges = store.config.real_bridges
-    active = store.config.active_real_bridge
-    if active:
-        for bridge in bridges:
-            if bridge.id == active:
-                return bridge
-    return bridges[0] if bridges else None
 
 
 if __name__ == "__main__":

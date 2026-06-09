@@ -98,15 +98,14 @@ Requires Python 3.13+.
 # create a virtualenv, install the package + dev deps, and set up pre-commit
 scripts/setup.sh
 
-# pair with your real Hue bridge (press the link button first), then list its areas
-ambilight-hue-bridge pair 192.168.1.50
-ambilight-hue-bridge areas
-# then edit data/config.yaml: set the bridge's entertainment_area and each
-# virtual light's `channels` (the real entertainment-channel ids it should drive)
-
 # run the service (port 80 needs privileges; use --http-port for a quick local test)
 sudo ambilight-hue-bridge --log-level DEBUG
-# or: python -m ambilight_hue_bridge --http-port 8080 --log-level DEBUG
+# or: python -m ambilight_hue_bridge --http-port 8081 --log-level DEBUG
+
+# then open the web UI at http://<host>:8080 to pair your Hue bridge (press the
+# link button first) and select its entertainment area.
+# A `pair` / `areas` CLI is also available for headless setup. For now, set each
+# virtual light's `channels` in data/config.yaml (the mapping UI is still WIP).
 
 # run the checks
 pre-commit run --all-files
@@ -124,8 +123,9 @@ project follows the conventions of [aiohue](https://github.com/home-assistant-li
 - [x] Virtual bridge: SSDP/UPnP discovery + legacy v1 REST emulation + pairing
 - [x] Outbound engine: v1 state → RGB, ingest buffer, channel mapping, on-demand streaming
 - [ ] Verify the TV ↔ bridge wire protocol against a real TV (capture via the request log)
+- [x] Web configuration UI — bridge pairing + entertainment-area selection
 - [ ] Inbound DTLS server (UDP 2100) for newer Android Ambilight TVs
-- [ ] Web configuration UI (pairing, area selection, gradient/light → channel mapping)
+- [ ] Web UI: gradient / light → channel mapping (channels are config-file only for now)
 - [ ] Docker image (multi-arch)
 - [ ] Home Assistant OS add-on
 

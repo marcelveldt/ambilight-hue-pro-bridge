@@ -16,6 +16,9 @@ CONFIG_FILENAME: Final = "config.yaml"
 # faithful default (running on it needs privileges; the HA add-on runs as root).
 DEFAULT_HTTP_PORT: Final = 80
 
+# The web configuration UI is served on its own port (kept off the TV-facing v1 API).
+DEFAULT_WEB_UI_PORT: Final = 8080
+
 # SSDP / UPnP discovery.
 SSDP_MCAST_ADDR: Final = "239.255.255.250"
 SSDP_PORT: Final = 1900

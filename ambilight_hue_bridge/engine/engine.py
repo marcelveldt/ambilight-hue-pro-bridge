@@ -10,11 +10,12 @@ from typing import TYPE_CHECKING
 
 from hue_entertainment import EntertainmentSession
 
+from ambilight_hue_bridge.outbound.controller import active_bridge
+
 from .ingest import ColorBuffer
 from .mapping import map_to_commands
 
 if TYPE_CHECKING:
-    from ambilight_hue_bridge.config.models import RealBridge
     from ambilight_hue_bridge.config.store import ConfigStore
 
 LOGGER = logging.getLogger(__name__)
@@ -71,23 +72,13 @@ class Engine:
 
     def _can_stream(self) -> bool:
         """Return whether an active real bridge with credentials and an area is configured."""
-        bridge = self._active_bridge()
+        bridge = active_bridge(self._store)
         return bridge is not None and bool(bridge.client_key and bridge.entertainment_area)
-
-    def _active_bridge(self) -> RealBridge | None:
-        """Return the configured active real bridge (or the first one)."""
-        bridges = self._store.config.real_bridges
-        active_id = self._store.config.active_real_bridge
-        if active_id:
-            for bridge in bridges:
-                if bridge.id == active_id:
-                    return bridge
-        return bridges[0] if bridges else None
 
     async def _start_stream(self) -> None:
         """Open the entertainment session and start the frame ticker."""
         try:
-            bridge = self._active_bridge()
+            bridge = active_bridge(self._store)
             if bridge is None:
                 return
             session = EntertainmentSession(

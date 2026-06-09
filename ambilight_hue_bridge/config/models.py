@@ -6,7 +6,11 @@ from dataclasses import dataclass, field
 
 from mashumaro.mixins.yaml import DataClassYAMLMixin
 
-from ambilight_hue_bridge.const import DEFAULT_HTTP_PORT, STREAMING_LIGHT_MODEL_ID
+from ambilight_hue_bridge.const import (
+    DEFAULT_HTTP_PORT,
+    DEFAULT_WEB_UI_PORT,
+    STREAMING_LIGHT_MODEL_ID,
+)
 
 
 @dataclass
@@ -40,6 +44,7 @@ class VirtualBridge:
     # None => auto-detect the MAC from the host on first run.
     mac: str | None = None
     http_port: int = DEFAULT_HTTP_PORT
+    web_port: int = DEFAULT_WEB_UI_PORT
     enable_inbound_dtls: bool = False
 
 

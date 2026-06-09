@@ -17,6 +17,7 @@ from .emulator.pairing import PairingManager
 from .emulator.rest_v1 import HueV1Emulator
 from .engine.engine import Engine
 from .identity import bridge_id, bridge_udn, get_host_mac
+from .web.server import WebServer
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -53,6 +54,7 @@ class BridgeApp:
         self._engine: Engine | None = None
         self._ssdp: SSDPServer | None = None
         self._runner: web.AppRunner | None = None
+        self._web_runner: web.AppRunner | None = None
 
     async def run(self) -> None:
         """Start all services and run until :meth:`request_stop` (or cancellation)."""
@@ -96,6 +98,15 @@ class BridgeApp:
         )
         self._ssdp = ssdp
         await ssdp.start()
+
+        web_server = WebServer(store=self._store, engine=engine, mac=mac, host_ip=host_ip)
+        web_runner = web.AppRunner(web_server.create_app(), access_log=None)
+        self._web_runner = web_runner
+        await web_runner.setup()
+        web_port = config.virtual_bridge.web_port
+        await web.TCPSite(web_runner, host="0.0.0.0", port=web_port).start()
+        LOGGER.info("Web configuration UI on http://%s:%d", host_ip, web_port)
+
         LOGGER.info(
             "%s ready - bridge id %s, %d virtual light(s)",
             config.virtual_bridge.name,
@@ -104,13 +115,16 @@ class BridgeApp:
         )
 
     async def stop(self) -> None:
-        """Stop the outbound stream, the SSDP responder and the HTTP API."""
+        """Stop the outbound stream, the web UI, the SSDP responder and the HTTP API."""
         if self._engine is not None:
             await self._engine.stop()
             self._engine = None
         if self._ssdp is not None:
             await self._ssdp.stop()
             self._ssdp = None
+        if self._web_runner is not None:
+            await self._web_runner.cleanup()
+            self._web_runner = None
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None

@@ -55,12 +55,14 @@ ignore-words-list = "ambilight,hass,"
 
 [tool.setuptools]
 include-package-data = true
-packages = ["ambilight_hue_bridge"]
 platforms = ["any"]
 zip-safe = false
 
+[tool.setuptools.packages.find]
+include = ["ambilight_hue_bridge*"]
+
 [tool.setuptools.package-data]
-ambilight_hue_bridge = ["py.typed"]
+ambilight_hue_bridge = ["py.typed", "web/static/*"]
 
 [tool.ruff]
 fix = true
