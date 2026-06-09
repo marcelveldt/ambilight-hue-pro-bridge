@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import orjson
 from aiohttp import web
 
+from ambilight_hue_bridge.color import state_to_rgb16
 from ambilight_hue_bridge.const import (
     BRIDGE_API_VERSION,
     BRIDGE_DATASTORE_VERSION,
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from aiohttp.typedefs import Handler
 
     from ambilight_hue_bridge.config.store import ConfigStore
+    from ambilight_hue_bridge.engine.engine import Engine
 
     from .pairing import PairingManager
 
@@ -78,6 +80,7 @@ class HueV1Emulator:
         pairing: PairingManager,
         host_ip: str,
         mac: str,
+        engine: Engine | None = None,
     ) -> None:
         """
         Initialize the emulator.
@@ -86,11 +89,13 @@ class HueV1Emulator:
         :param pairing: Pairing manager for username/clientkey handling.
         :param host_ip: LAN IP address advertised in the UPnP descriptor.
         :param mac: Resolved host MAC used to derive the bridge id and UDN.
+        :param engine: Optional engine that streams color updates to the real bridge.
         """
         self._store = store
         self._pairing = pairing
         self._host_ip = host_ip
         self._mac = mac
+        self._engine = engine
         self._states: dict[str, dict[str, Any]] = {
             light.id: default_light_state() for light in store.config.virtual_lights
         }
@@ -204,7 +209,7 @@ class HueV1Emulator:
         for key, value in body.items():
             self._states[light_id][key] = value
             result.append({"success": {f"/lights/{light_id}/state/{key}": value}})
-        # TODO(M3): forward the resulting color to the outbound Entertainment stream.
+        self._submit_color(light_id)
         return _json(result)
 
     async def _handle_groups(self, request: web.Request) -> web.StreamResponse:
@@ -267,7 +272,10 @@ class HueV1Emulator:
             return unauthorized
         group_id = request.match_info["group_id"]
         body = await _read_json(request)
-        # TODO(M3): forward the resulting color to the outbound Entertainment stream.
+        for light_id in self._group_light_ids(group_id):
+            state = self._states.setdefault(light_id, default_light_state())
+            state.update(body)
+            self._submit_color(light_id)
         return _json(
             [
                 {"success": {f"/groups/{group_id}/action/{key}": value}}
@@ -297,6 +305,20 @@ class HueV1Emulator:
     def _light_ids(self) -> list[str]:
         """Return the ids of all exposed virtual lights."""
         return [light.id for light in self._store.config.virtual_lights]
+
+    def _group_light_ids(self, group_id: str) -> list[str]:
+        """Return the light ids belonging to a group (group 0 = all lights)."""
+        if group_id == "0":
+            return self._light_ids()
+        group = self._groups.get(group_id)
+        if group is None:
+            return []
+        return [str(light_id) for light_id in group.get("lights", [])]
+
+    def _submit_color(self, light_id: str) -> None:
+        """Push a light's current color to the outbound stream, if an engine is wired."""
+        if self._engine is not None and light_id in self._states:
+            self._engine.submit_color(light_id, state_to_rgb16(self._states[light_id]))
 
     def _light_by_id(self, light_id: str) -> Any:
         """Return the VirtualLight with the given id, or None."""

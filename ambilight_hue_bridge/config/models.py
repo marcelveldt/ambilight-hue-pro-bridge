@@ -44,9 +44,26 @@ class VirtualBridge:
 
 
 @dataclass
+class RealBridge:
+    """A real Hue bridge (V2 or Pro) the colors are streamed to via the Entertainment API."""
+
+    id: str
+    host: str
+    app_key: str = ""
+    client_key: str = ""
+    # "v2" (square) or "pro" - informational; both use the same CLIP v2 + DTLS path.
+    model: str = "v2"
+    # rid of the entertainment_configuration on the bridge to stream to.
+    entertainment_area: str = ""
+
+
+@dataclass
 class Config(DataClassYAMLMixin):
     """Top-level persisted configuration."""
 
     virtual_bridge: VirtualBridge = field(default_factory=VirtualBridge)
     virtual_lights: list[VirtualLight] = field(default_factory=list)
     users: list[PairedUser] = field(default_factory=list)
+    real_bridges: list[RealBridge] = field(default_factory=list)
+    # id of the real bridge currently streamed to (empty => first configured bridge).
+    active_real_bridge: str = ""

@@ -15,6 +15,7 @@ from .const import CONFIG_FILENAME
 from .discovery.ssdp import SSDPServer
 from .emulator.pairing import PairingManager
 from .emulator.rest_v1 import HueV1Emulator
+from .engine.engine import Engine
 from .identity import bridge_id, bridge_udn, get_host_mac
 
 if TYPE_CHECKING:
@@ -49,6 +50,7 @@ class BridgeApp:
         self._store = ConfigStore(data_dir / CONFIG_FILENAME)
         self._http_port_override = http_port
         self._shutdown = asyncio.Event()
+        self._engine: Engine | None = None
         self._ssdp: SSDPServer | None = None
         self._runner: web.AppRunner | None = None
 
@@ -71,11 +73,14 @@ class BridgeApp:
         host_ip = get_host_ip()
         port = config.virtual_bridge.http_port
 
+        engine = Engine(self._store)
+        self._engine = engine
         emulator = HueV1Emulator(
             store=self._store,
             pairing=PairingManager(self._store),
             host_ip=host_ip,
             mac=mac,
+            engine=engine,
         )
         runner = web.AppRunner(emulator.create_app(), access_log=None)
         self._runner = runner
@@ -99,7 +104,10 @@ class BridgeApp:
         )
 
     async def stop(self) -> None:
-        """Stop the SSDP responder and the HTTP API."""
+        """Stop the outbound stream, the SSDP responder and the HTTP API."""
+        if self._engine is not None:
+            await self._engine.stop()
+            self._engine = None
         if self._ssdp is not None:
             await self._ssdp.stop()
             self._ssdp = None

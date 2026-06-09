@@ -5,9 +5,10 @@ the new **Hue Pro bridge** — over the low-latency **Entertainment API**, with 
 for **multi-zone / gradient lights**.
 
 > [!WARNING]
-> **Status: early development.** This repository currently contains the project
-> scaffolding and a service skeleton only. The bridge components described below are
-> being built — nothing is functional yet. See [Roadmap](#roadmap).
+> **Status: early development.** The virtual bridge (SSDP discovery, pairing, v1 REST API)
+> and the outbound Entertainment streaming engine work; the web UI, the inbound DTLS path
+> for newer TVs, and packaging are still to come, and the TV-side wire protocol still needs
+> verification against a real TV. See [Roadmap](#roadmap).
 
 ## Why this exists
 
@@ -97,10 +98,15 @@ Requires Python 3.13+.
 # create a virtualenv, install the package + dev deps, and set up pre-commit
 scripts/setup.sh
 
-# run the (skeleton) service
-ambilight-hue-bridge --log-level DEBUG
-# or
-python -m ambilight_hue_bridge
+# pair with your real Hue bridge (press the link button first), then list its areas
+ambilight-hue-bridge pair 192.168.1.50
+ambilight-hue-bridge areas
+# then edit data/config.yaml: set the bridge's entertainment_area and each
+# virtual light's `channels` (the real entertainment-channel ids it should drive)
+
+# run the service (port 80 needs privileges; use --http-port for a quick local test)
+sudo ambilight-hue-bridge --log-level DEBUG
+# or: python -m ambilight_hue_bridge --http-port 8080 --log-level DEBUG
 
 # run the checks
 pre-commit run --all-files
@@ -114,11 +120,12 @@ project follows the conventions of [aiohue](https://github.com/home-assistant-li
 
 ## Roadmap
 
-- [ ] Finalize the protocol design (verify the TV ↔ bridge wire protocol against a real TV)
-- [ ] Hue Entertainment streaming client (extracted/shared library)
-- [ ] Virtual bridge: SSDP/UPnP discovery + legacy v1 REST emulation + pairing
-- [ ] Mapping engine (incl. gradient → multi-zone)
-- [ ] Web configuration UI + persistent config store
+- [x] Hue Entertainment streaming client (extracted to [music-assistant/hue-entertainment](https://github.com/music-assistant/hue-entertainment))
+- [x] Virtual bridge: SSDP/UPnP discovery + legacy v1 REST emulation + pairing
+- [x] Outbound engine: v1 state → RGB, ingest buffer, channel mapping, on-demand streaming
+- [ ] Verify the TV ↔ bridge wire protocol against a real TV (capture via the request log)
+- [ ] Inbound DTLS server (UDP 2100) for newer Android Ambilight TVs
+- [ ] Web configuration UI (pairing, area selection, gradient/light → channel mapping)
 - [ ] Docker image (multi-arch)
 - [ ] Home Assistant OS add-on
 

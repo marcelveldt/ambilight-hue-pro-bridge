@@ -143,6 +143,8 @@ select = ["ALL"]
 [tool.ruff.lint.per-file-ignores]
 # Tests poke at private members, use magic values, and use loosely-typed fixtures.
 "tests/*" = ["SLF001", "PLR2004", "ANN001"]
+# The CLI prints command output to stdout.
+"ambilight_hue_bridge/__main__.py" = ["T201"]
 
 [tool.ruff.lint.flake8-pytest-style]
 fixture-parentheses = false
