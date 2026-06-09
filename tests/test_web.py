@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from hue_entertainment import DiscoveredBridge
+from hue_entertainment import DiscoveredBridge, EntertainmentArea, LightChannel
 
+from ambilight_hue_bridge.config.models import RealBridge
 from ambilight_hue_bridge.config.store import ConfigStore
 from ambilight_hue_bridge.web.server import WebServer
 
@@ -101,3 +102,80 @@ async def test_update_and_delete_bridge(aiohttp_client, web_setup, monkeypatch) 
     assert updated["entertainment_area"] == "area-9"
     await client.delete(f"/api/bridges/{bridge_id}")
     assert not store.config.real_bridges
+
+
+def _configure_area(store: ConfigStore) -> None:
+    """Give the store an active bridge with a selected entertainment area."""
+    store.config.real_bridges = [
+        RealBridge(
+            id="b", host="1.2.3.4", app_key="u", client_key="k", entertainment_area="area-1"
+        ),
+    ]
+    store.config.active_real_bridge = "b"
+
+
+def _fake_areas_factory() -> object:
+    """Return an async list_areas replacement with two channels (left and right)."""
+
+    async def fake_areas(_host: str, _app_key: str) -> list[EntertainmentArea]:
+        return [
+            EntertainmentArea(
+                id="area-1",
+                name="Living",
+                channels=[
+                    LightChannel(
+                        channel_id=0, service_id="s0", name="c0", position=(-0.9, 0.8, 0.0)
+                    ),
+                    LightChannel(
+                        channel_id=1, service_id="s1", name="c1", position=(0.9, 0.8, 0.0)
+                    ),
+                ],
+            ),
+        ]
+
+    return fake_areas
+
+
+async def test_light_crud(aiohttp_client, web_setup) -> None:
+    """Virtual lights can be created, updated (incl. channels) and deleted."""
+    app, _store = web_setup
+    client = await aiohttp_client(app)
+    created = await (
+        await client.post("/api/lights", json={"name": "Left", "position": "left"})
+    ).json()
+    light_id = created["id"]
+    assert created["name"] == "Left"
+    updated = await (
+        await client.put(f"/api/lights/{light_id}", json={"channels": [0, 2], "name": "Left edge"})
+    ).json()
+    assert updated["channels"] == [0, 2]
+    assert updated["name"] == "Left edge"
+    await client.delete(f"/api/lights/{light_id}")
+    remaining = await (await client.get("/api/lights")).json()
+    assert all(light["id"] != light_id for light in remaining)
+
+
+async def test_channels_endpoint(aiohttp_client, web_setup, monkeypatch) -> None:
+    """The channels endpoint returns the active area's channels."""
+    app, store = web_setup
+    _configure_area(store)
+    monkeypatch.setattr("ambilight_hue_bridge.web.server.list_areas", _fake_areas_factory())
+    client = await aiohttp_client(app)
+    data = await (await client.get("/api/channels")).json()
+    assert [channel["channel_id"] for channel in data["channels"]] == [0, 1]
+
+
+async def test_auto_map_creates_one_light_per_channel(
+    aiohttp_client, web_setup, monkeypatch
+) -> None:
+    """Auto-map replaces the lights with one per channel, positioned by x."""
+    app, store = web_setup
+    _configure_area(store)
+    monkeypatch.setattr("ambilight_hue_bridge.web.server.list_areas", _fake_areas_factory())
+    client = await aiohttp_client(app)
+    lights = await (await client.post("/api/lights/auto-map")).json()
+    assert len(lights) == 2
+    assert lights[0]["channels"] == [0]
+    assert lights[0]["position"] == "left"
+    assert lights[1]["position"] == "right"
+    assert len(store.config.virtual_lights) == 2

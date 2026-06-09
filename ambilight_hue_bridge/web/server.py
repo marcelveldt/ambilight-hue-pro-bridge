@@ -10,8 +10,9 @@ import aiohttp
 from aiohttp import web
 from hue_entertainment import discover_bridges
 
+from ambilight_hue_bridge.config.models import VirtualLight
 from ambilight_hue_bridge.identity import bridge_id
-from ambilight_hue_bridge.outbound.controller import list_areas, pair_and_store
+from ambilight_hue_bridge.outbound.controller import active_bridge, list_areas, pair_and_store
 
 if TYPE_CHECKING:
     from ambilight_hue_bridge.config.models import RealBridge
@@ -61,6 +62,12 @@ class WebServer:
                 web.get("/api/bridges/{bridge_id}/areas", self._handle_areas),
                 web.put("/api/bridges/{bridge_id}", self._handle_update_bridge),
                 web.delete("/api/bridges/{bridge_id}", self._handle_delete_bridge),
+                web.get("/api/channels", self._handle_channels),
+                web.get("/api/lights", self._handle_lights_list),
+                web.post("/api/lights", self._handle_create_light),
+                web.post("/api/lights/auto-map", self._handle_auto_map),
+                web.put("/api/lights/{light_id}", self._handle_update_light),
+                web.delete("/api/lights/{light_id}", self._handle_delete_light),
             ],
         )
         return app
@@ -171,6 +178,111 @@ class WebServer:
         self._store.save()
         return web.json_response({"deleted": target})
 
+    async def _handle_channels(self, _request: web.Request) -> web.StreamResponse:
+        """Return the entertainment channels of the active bridge's selected area."""
+        channels = await self._active_area_channels()
+        if channels is None:
+            return web.json_response({"channels": []})
+        return web.json_response({"channels": channels})
+
+    async def _handle_lights_list(self, _request: web.Request) -> web.StreamResponse:
+        """List the virtual lights exposed to the TV."""
+        return web.json_response(
+            [_light_dict(light) for light in self._store.config.virtual_lights],
+        )
+
+    async def _handle_create_light(self, request: web.Request) -> web.StreamResponse:
+        """Create a new virtual light."""
+        body = await _read_json(request)
+        new_id = self._next_light_id()
+        light = VirtualLight(
+            id=new_id,
+            name=str(body.get("name") or f"Light {new_id}"),
+            position=str(body.get("position", "center")),
+        )
+        self._store.config.virtual_lights.append(light)
+        self._store.save()
+        return web.json_response(_light_dict(light))
+
+    async def _handle_update_light(self, request: web.Request) -> web.StreamResponse:
+        """Update a virtual light's name, position and channel mapping."""
+        light = self._virtual_light_by_id(request.match_info["light_id"])
+        if light is None:
+            return web.json_response({"error": "Unknown light."}, status=404)
+        body = await _read_json(request)
+        if "name" in body:
+            light.name = str(body["name"])
+        if "position" in body:
+            light.position = str(body["position"])
+        channels = body.get("channels")
+        if isinstance(channels, list):
+            light.channels = [int(channel) for channel in channels]
+        self._store.save()
+        return web.json_response(_light_dict(light))
+
+    async def _handle_delete_light(self, request: web.Request) -> web.StreamResponse:
+        """Remove a virtual light."""
+        target = request.match_info["light_id"]
+        config = self._store.config
+        config.virtual_lights = [light for light in config.virtual_lights if light.id != target]
+        self._store.save()
+        return web.json_response({"deleted": target})
+
+    async def _handle_auto_map(self, _request: web.Request) -> web.StreamResponse:
+        """Replace the virtual lights with one per channel of the active area."""
+        bridge = active_bridge(self._store)
+        if bridge is None or not bridge.app_key or not bridge.entertainment_area:
+            return web.json_response({"error": "Select an entertainment area first."}, status=400)
+        area = await self._active_area()
+        if area is None:
+            return web.json_response({"error": "Entertainment area not found."}, status=404)
+        lights = [
+            VirtualLight(
+                id=str(index + 1),
+                name=f"Zone {index + 1}",
+                position=_position_from_x(channel.position[0]),
+                channels=[channel.channel_id],
+            )
+            for index, channel in enumerate(area.channels)
+        ]
+        self._store.config.virtual_lights = lights
+        self._store.save()
+        return web.json_response([_light_dict(light) for light in lights])
+
+    async def _active_area(self) -> Any:
+        """Return the active bridge's selected EntertainmentArea, or None."""
+        bridge = active_bridge(self._store)
+        if bridge is None or not bridge.app_key or not bridge.entertainment_area:
+            return None
+        try:
+            areas = await list_areas(bridge.host, bridge.app_key)
+        except _PAIR_ERRORS as err:
+            LOGGER.debug("Could not list areas: %s", err)
+            return None
+        return next((area for area in areas if area.id == bridge.entertainment_area), None)
+
+    async def _active_area_channels(self) -> list[dict[str, Any]] | None:
+        """Return the channels of the active area as JSON dicts, or None if unavailable."""
+        area = await self._active_area()
+        if area is None:
+            return None
+        return [
+            {"channel_id": channel.channel_id, "position": list(channel.position)}
+            for channel in area.channels
+        ]
+
+    def _virtual_light_by_id(self, light_id: str) -> VirtualLight | None:
+        """Return a virtual light by id, or None."""
+        for light in self._store.config.virtual_lights:
+            if light.id == light_id:
+                return light
+        return None
+
+    def _next_light_id(self) -> str:
+        """Return the next free numeric virtual-light id as a string."""
+        ids = [int(light.id) for light in self._store.config.virtual_lights if light.id.isdigit()]
+        return str(max(ids, default=0) + 1)
+
     def _bridge_dict(self, bridge: RealBridge) -> dict[str, Any]:
         """Build the JSON representation of a real bridge for the UI."""
         return {
@@ -197,3 +309,23 @@ async def _read_json(request: web.Request) -> dict[str, Any]:
     except ValueError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _light_dict(light: VirtualLight) -> dict[str, Any]:
+    """Build the JSON representation of a virtual light for the UI."""
+    return {
+        "id": light.id,
+        "name": light.name,
+        "position": light.position,
+        "modelid": light.modelid,
+        "channels": light.channels,
+    }
+
+
+def _position_from_x(x: float) -> str:
+    """Map an entertainment channel's x position to a coarse screen position."""
+    if x < -0.3:
+        return "left"
+    if x > 0.3:
+        return "right"
+    return "center"

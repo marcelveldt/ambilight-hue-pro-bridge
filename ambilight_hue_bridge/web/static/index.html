@@ -52,7 +52,16 @@
   <div id="bridges"></div>
 
   <h2>Exposed lights</h2>
-  <p class="muted">Lights the TV sees. Each light streams to the entertainment channels listed.</p>
+  <p class="muted">
+    Lights the TV sees. Map each to the real entertainment channel(s) it should drive.
+    Use <em>One light per channel</em> to split a gradient strip into individually addressable
+    zones. Channels come from the active bridge's selected entertainment area.
+  </p>
+  <div class="row" style="margin-bottom:.6rem">
+    <button onclick="addLight()">Add light</button>
+    <button onclick="autoMap()">One light per channel</button>
+    <span class="muted" id="lights-status"></span>
+  </div>
   <div id="lights"></div>
 </main>
 
@@ -70,16 +79,6 @@ async function loadStatus() {
   const streaming = s.streaming ? "● streaming" : "○ idle";
   document.getElementById("subtitle").textContent =
     `Bridge id ${s.bridge_id} · ${s.host}:${s.http_port} · ${streaming}`;
-  const lights = document.getElementById("lights");
-  lights.innerHTML = s.virtual_lights.length ? "" : '<p class="muted">No lights configured.</p>';
-  for (const l of s.virtual_lights) {
-    const div = document.createElement("div");
-    div.className = "card";
-    const chans = l.channels.length ? l.channels.join(", ") : "— not mapped —";
-    div.innerHTML = `<strong>${l.name}</strong> <span class="muted">(id ${l.id}, ${l.position})</span>`
-      + `<div class="muted">channels: ${chans}</div>`;
-    lights.appendChild(div);
-  }
 }
 
 async function loadBridges() {
@@ -87,7 +86,10 @@ async function loadBridges() {
   const container = document.getElementById("bridges");
   container.innerHTML = bridges.length ? "" : '<p class="muted">No bridges paired yet.</p>';
   for (const b of bridges) {
-    container.appendChild(renderBridge(b));
+    const card = renderBridge(b);
+    container.appendChild(card);
+    // Auto-load areas for an already-configured bridge so its selected area shows.
+    if (b.entertainment_area) card.querySelector("[data-load]").click();
   }
 }
 
@@ -206,8 +208,93 @@ async function discover() {
   }
 }
 
+let channelsCache = [];
+const POSITIONS = ["left", "right", "center", "top", "bottom", "behind"];
+
+async function loadChannels() {
+  try {
+    const data = await api("/api/channels");
+    channelsCache = data.channels || [];
+  } catch {
+    channelsCache = [];
+  }
+}
+
+async function loadLights() {
+  const lights = await api("/api/lights");
+  const container = document.getElementById("lights");
+  container.innerHTML = lights.length
+    ? "" : '<p class="muted">No lights yet — click “Add light” or “One light per channel”.</p>';
+  for (const light of lights) container.appendChild(renderLight(light));
+  document.getElementById("lights-status").textContent =
+    channelsCache.length ? "" : "Select an entertainment area above to map channels.";
+}
+
+function renderLight(light) {
+  const card = document.createElement("div");
+  card.className = "card";
+  const opts = POSITIONS.map(
+    (p) => `<option value="${p}"${p === light.position ? " selected" : ""}>${p}</option>`,
+  ).join("");
+  const checks = channelsCache.length
+    ? channelsCache.map((c) => {
+        const on = light.channels.includes(c.channel_id) ? " checked" : "";
+        return `<label class="badge"><input type="checkbox" data-ch value="${c.channel_id}"${on}/> ch ${c.channel_id}</label>`;
+      }).join(" ")
+    : '<span class="muted">no channels — select an entertainment area first</span>';
+  card.innerHTML =
+    `<div class="row"><input data-name size="18"/> <select data-pos>${opts}</select>`
+    + `<span class="muted">id ${light.id}</span><span class="spacer"></span>`
+    + `<button data-save class="primary">Save</button><button data-del>Remove</button></div>`
+    + `<div class="row" style="margin-top:.5rem;flex-wrap:wrap">${checks}</div>`
+    + `<span class="error" data-err></span>`;
+  card.querySelector("[data-name]").value = light.name;
+  const err = card.querySelector("[data-err]");
+  card.querySelector("[data-save]").onclick = async () => {
+    err.textContent = "";
+    const channels = [...card.querySelectorAll("[data-ch]:checked")].map((el) => Number(el.value));
+    try {
+      await api(`/api/lights/${light.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: card.querySelector("[data-name]").value,
+          position: card.querySelector("[data-pos]").value,
+          channels,
+        }),
+      });
+      await loadLights();
+    } catch (e) { err.textContent = String(e.message || e); }
+  };
+  card.querySelector("[data-del]").onclick = async () => {
+    try { await api(`/api/lights/${light.id}`, { method: "DELETE" }); await loadLights(); }
+    catch (e) { err.textContent = String(e.message || e); }
+  };
+  return card;
+}
+
+async function addLight() {
+  await api("/api/lights", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  await loadLights();
+}
+
+async function autoMap() {
+  if (!confirm("Replace all exposed lights with one per channel of the active area?")) return;
+  const status = document.getElementById("lights-status");
+  status.textContent = "Mapping…";
+  try {
+    await api("/api/lights/auto-map", { method: "POST" });
+    await loadLights();
+    status.textContent = "";
+  } catch (e) {
+    status.textContent = String(e.message || e);
+  }
+}
+
 async function refresh() {
   await Promise.all([loadStatus(), loadBridges()]);
+  await loadChannels();
+  await loadLights();
 }
 
 refresh().catch((e) => { document.getElementById("subtitle").textContent = "Error: " + e.message; });
