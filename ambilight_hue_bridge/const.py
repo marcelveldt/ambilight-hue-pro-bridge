@@ -35,6 +35,10 @@ BRIDGE_DATASTORE_VERSION: Final = "126"
 UDN_PREFIX: Final = "2f402f80-da50-11e1-9b23-"
 UPNP_SERVER: Final = "Linux/3.14.0 UPnP/1.0 IpBridge/1.67.0"
 
+# devicetype registered with the real bridge when pairing; shown in the Hue app's list of
+# connected apps (format "appname#devicename").
+PAIR_DEVICE_TYPE: Final = "ambilight_hue_bridge#bridge"
+
 # Default modelid used for synthesized virtual lights. It must be a model the TV firmware
 # recognizes as Entertainment-streaming-capable, otherwise the TV falls back to the slow
 # ~1 Hz v1 path for that lamp. This is configurable per virtual light and likely needs

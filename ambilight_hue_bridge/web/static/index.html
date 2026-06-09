@@ -53,13 +53,13 @@
 
   <h2>Exposed lights</h2>
   <p class="muted">
-    Lights the TV sees. Map each to the real entertainment channel(s) it should drive.
-    Use <em>One light per channel</em> to split a gradient strip into individually addressable
-    zones. Channels come from the active bridge's selected entertainment area.
+    Lights the TV sees — mirrored from the selected entertainment area (one per zone, named
+    after the real light). Edit names/positions or remap channels below, or
+    <em>Reset to mirror</em> to rebuild them from the area.
   </p>
   <div class="row" style="margin-bottom:.6rem">
     <button onclick="addLight()">Add light</button>
-    <button onclick="autoMap()">One light per channel</button>
+    <button onclick="autoMap()">Reset to mirror</button>
     <span class="muted" id="lights-status"></span>
   </div>
   <div id="lights"></div>
@@ -78,19 +78,15 @@ async function loadStatus() {
   document.getElementById("title").textContent = s.name;
   const streaming = s.streaming ? "● streaming" : "○ idle";
   document.getElementById("subtitle").textContent =
-    `Bridge id ${s.bridge_id} · ${s.host}:${s.http_port} · ${streaming}`;
+    `Virtual bridge ID ${s.bridge_id} · ${s.host}:${s.http_port} · ${streaming}`;
 }
 
 async function loadBridges() {
   const bridges = await api("/api/bridges");
   const container = document.getElementById("bridges");
   container.innerHTML = bridges.length ? "" : '<p class="muted">No bridges paired yet.</p>';
-  for (const b of bridges) {
-    const card = renderBridge(b);
-    container.appendChild(card);
-    // Auto-load areas for an already-configured bridge so its selected area shows.
-    if (b.entertainment_area) card.querySelector("[data-load]").click();
-  }
+  for (const b of bridges) container.appendChild(renderBridge(b));
+  return bridges;
 }
 
 function renderBridge(b) {
@@ -101,10 +97,8 @@ function renderBridge(b) {
   card.innerHTML = `<div class="row"><strong>${b.host}</strong> <span class="muted">${b.model}</span>`
     + `<span class="spacer"></span>${badges}</div>`
     + `<div class="row" style="margin-top:.6rem">`
-    + `<select data-area><option value="">— select entertainment area —</option></select>`
-    + `<button data-load>Load areas</button>`
-    + `<button data-save class="primary">Save area</button>`
-    + (b.active ? "" : `<button data-active>Set active</button>`)
+    + `<span class="muted">Entertainment area</span>`
+    + `<select data-area><option value="">— loading… —</option></select>`
     + `<span class="spacer"></span><button data-del>Remove</button></div>`
     + `<span class="error" data-err></span>`;
 
@@ -112,39 +106,32 @@ function renderBridge(b) {
   const err = card.querySelector("[data-err]");
   const setErr = (e) => { err.textContent = e ? String(e.message || e) : ""; };
 
-  card.querySelector("[data-load]").onclick = async () => {
-    setErr();
+  // Load the bridge's areas automatically and pre-select the saved one.
+  (async () => {
     try {
       const areas = await api(`/api/bridges/${b.id}/areas`);
       sel.innerHTML = '<option value="">— select entertainment area —</option>';
       for (const a of areas) {
         const opt = document.createElement("option");
         opt.value = a.id;
-        opt.textContent = `${a.name} (${a.channels.length} channels)`;
+        opt.textContent = `${a.name} (${a.channels.length} zones)`;
         if (a.id === b.entertainment_area) opt.selected = true;
         sel.appendChild(opt);
       }
-    } catch (e) { setErr(e); }
-  };
-  card.querySelector("[data-save]").onclick = async () => {
+    } catch (e) {
+      sel.innerHTML = '<option value="">— could not load areas —</option>';
+      setErr(e);
+    }
+  })();
+
+  // Selecting an area saves it, activates the bridge, and (by default) mirrors it.
+  sel.onchange = async () => {
     setErr();
     try {
       await api(`/api/bridges/${b.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ entertainment_area: sel.value }),
-      });
-      await refresh();
-    } catch (e) { setErr(e); }
-  };
-  const activeBtn = card.querySelector("[data-active]");
-  if (activeBtn) activeBtn.onclick = async () => {
-    setErr();
-    try {
-      await api(`/api/bridges/${b.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ active: true }),
+        body: JSON.stringify({ entertainment_area: sel.value, active: true }),
       });
       await refresh();
     } catch (e) { setErr(e); }
@@ -239,7 +226,7 @@ function renderLight(light) {
   const checks = channelsCache.length
     ? channelsCache.map((c) => {
         const on = light.channels.includes(c.channel_id) ? " checked" : "";
-        return `<label class="badge"><input type="checkbox" data-ch value="${c.channel_id}"${on}/> ch ${c.channel_id}</label>`;
+        return `<label class="badge"><input type="checkbox" data-ch value="${c.channel_id}"${on}/> ${c.name || ("ch " + c.channel_id)}</label>`;
       }).join(" ")
     : '<span class="muted">no channels — select an entertainment area first</span>';
   card.innerHTML =
@@ -279,7 +266,7 @@ async function addLight() {
 }
 
 async function autoMap() {
-  if (!confirm("Replace all exposed lights with one per channel of the active area?")) return;
+  if (!confirm("Rebuild the exposed lights by mirroring the active area? This replaces the current lights.")) return;
   const status = document.getElementById("lights-status");
   status.textContent = "Mapping…";
   try {
@@ -292,9 +279,11 @@ async function autoMap() {
 }
 
 async function refresh() {
-  await Promise.all([loadStatus(), loadBridges()]);
+  const [, bridges] = await Promise.all([loadStatus(), loadBridges()]);
   await loadChannels();
   await loadLights();
+  // First-run convenience: scan for bridges automatically when none are configured yet.
+  if (!bridges.length) discover();
 }
 
 refresh().catch((e) => { document.getElementById("subtitle").textContent = "Error: " + e.message; });

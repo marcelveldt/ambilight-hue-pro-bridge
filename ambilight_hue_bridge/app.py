@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 
 from aiohttp import web
 
-from .config.models import VirtualLight
 from .config.store import ConfigStore
 from .const import CONFIG_FILENAME
 from .discovery.ssdp import SSDPServer
@@ -69,7 +68,6 @@ class BridgeApp:
     async def start(self) -> None:
         """Load config and start the HTTP API and SSDP responder."""
         self._store.load()
-        self._ensure_defaults()
         config = self._store.config
         if self._http_port_override is not None:
             config.virtual_bridge.http_port = self._http_port_override
@@ -143,16 +141,3 @@ class BridgeApp:
     def request_stop(self) -> None:
         """Signal the running service to shut down."""
         self._shutdown.set()
-
-    def _ensure_defaults(self) -> None:
-        """Seed example virtual lights on first run so the TV has something to select."""
-        config = self._store.config
-        if config.virtual_lights:
-            return
-        config.virtual_lights = [
-            VirtualLight(id="1", name="Ambilight Left", position="left"),
-            VirtualLight(id="2", name="Ambilight Center", position="center"),
-            VirtualLight(id="3", name="Ambilight Right", position="right"),
-        ]
-        self._store.save()
-        LOGGER.info("Seeded %d default virtual lights", len(config.virtual_lights))

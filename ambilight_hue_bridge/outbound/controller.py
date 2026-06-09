@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from hue_entertainment import HueEntertainmentAPI
 
 from ambilight_hue_bridge.config.models import RealBridge
+from ambilight_hue_bridge.const import PAIR_DEVICE_TYPE
 
 if TYPE_CHECKING:
     from hue_entertainment import EntertainmentArea
@@ -22,7 +23,7 @@ async def pair_bridge(host: str) -> dict[str, str]:
     """
     api = HueEntertainmentAPI(host)
     try:
-        credentials: dict[str, str] = await api.pair()
+        credentials: dict[str, str] = await api.pair(device_type=PAIR_DEVICE_TYPE)
         return credentials
     finally:
         await api.close()

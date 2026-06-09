@@ -94,6 +94,7 @@ async def test_update_and_delete_bridge(aiohttp_client, web_setup, monkeypatch) 
         return {"username": "u", "clientkey": "k"}
 
     monkeypatch.setattr("ambilight_hue_bridge.outbound.controller.pair_bridge", fake_pair)
+    monkeypatch.setattr("ambilight_hue_bridge.web.server.list_areas", _fake_areas_factory())
     client = await aiohttp_client(app)
     bridge = await (await client.post("/api/bridges/pair", json={"host": "1.1.1.1"})).json()
     bridge_id = bridge["id"]

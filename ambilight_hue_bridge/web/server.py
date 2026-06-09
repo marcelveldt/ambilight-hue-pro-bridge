@@ -166,6 +166,13 @@ class WebServer:
         if body.get("active"):
             self._store.config.active_real_bridge = bridge.id
         self._store.save()
+        # Mirror the area by default: with no lights configured yet, create one per channel
+        # (named after the real light) so it works with zero manual mapping.
+        if bridge.entertainment_area and not self._store.config.virtual_lights:
+            area = await self._active_area()
+            if area is not None:
+                self._store.config.virtual_lights = _mirror_from_area(area)
+                self._store.save()
         return web.json_response(self._bridge_dict(bridge))
 
     async def _handle_delete_bridge(self, request: web.Request) -> web.StreamResponse:
@@ -236,18 +243,11 @@ class WebServer:
         area = await self._active_area()
         if area is None:
             return web.json_response({"error": "Entertainment area not found."}, status=404)
-        lights = [
-            VirtualLight(
-                id=str(index + 1),
-                name=f"Zone {index + 1}",
-                position=_position_from_x(channel.position[0]),
-                channels=[channel.channel_id],
-            )
-            for index, channel in enumerate(area.channels)
-        ]
-        self._store.config.virtual_lights = lights
+        self._store.config.virtual_lights = _mirror_from_area(area)
         self._store.save()
-        return web.json_response([_light_dict(light) for light in lights])
+        return web.json_response(
+            [_light_dict(light) for light in self._store.config.virtual_lights]
+        )
 
     async def _active_area(self) -> Any:
         """Return the active bridge's selected EntertainmentArea, or None."""
@@ -267,7 +267,11 @@ class WebServer:
         if area is None:
             return None
         return [
-            {"channel_id": channel.channel_id, "position": list(channel.position)}
+            {
+                "channel_id": channel.channel_id,
+                "name": channel.name,
+                "position": list(channel.position),
+            }
             for channel in area.channels
         ]
 
@@ -329,3 +333,34 @@ def _position_from_x(x: float) -> str:
     if x > 0.3:
         return "right"
     return "center"
+
+
+def _mirror_from_area(area: Any) -> list[VirtualLight]:
+    """
+    Build one virtual light per channel of an area, named after its real light.
+
+    Channels that share a light name (e.g. the zones of a gradient strip) are numbered.
+
+    :param area: An EntertainmentArea from the hue_entertainment library.
+    """
+    name_counts: dict[str, int] = {}
+    for channel in area.channels:
+        name_counts[channel.name] = name_counts.get(channel.name, 0) + 1
+    seen: dict[str, int] = {}
+    lights: list[VirtualLight] = []
+    for index, channel in enumerate(area.channels):
+        base = channel.name or f"Zone {index + 1}"
+        if name_counts.get(channel.name, 0) > 1:
+            seen[base] = seen.get(base, 0) + 1
+            name = f"{base} {seen[base]}"
+        else:
+            name = base
+        lights.append(
+            VirtualLight(
+                id=str(index + 1),
+                name=name,
+                position=_position_from_x(channel.position[0]),
+                channels=[channel.channel_id],
+            ),
+        )
+    return lights
