@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
+import signal
+from contextlib import suppress
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from .const import DEFAULT_DATA_DIR, DEFAULT_WEB_PORT, DISPLAY_NAME, PACKAGE_NAME
+from .app import BridgeApp
+from .const import DEFAULT_DATA_DIR, DISPLAY_NAME, PACKAGE_NAME
 
 LOGGER = logging.getLogger(PACKAGE_NAME)
 
@@ -21,7 +25,11 @@ def get_version() -> str:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments."""
+    """
+    Parse command-line arguments.
+
+    :param argv: Optional argument list (defaults to ``sys.argv``).
+    """
     parser = argparse.ArgumentParser(prog="ambilight-hue-bridge", description=DISPLAY_NAME)
     parser.add_argument(
         "--data-dir",
@@ -30,10 +38,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Directory for persistent configuration and state.",
     )
     parser.add_argument(
-        "--web-port",
+        "--http-port",
         type=int,
-        default=DEFAULT_WEB_PORT,
-        help="TCP port for the web configuration interface.",
+        default=None,
+        help="Override the virtual bridge HTTP port (default: from config, 80).",
     )
     parser.add_argument(
         "--log-level",
@@ -49,6 +57,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+async def _serve(args: argparse.Namespace) -> None:
+    """Run the bridge service until a stop signal is received."""
+    app = BridgeApp(args.data_dir, http_port=args.http_port)
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with suppress(NotImplementedError):
+            loop.add_signal_handler(sig, app.request_stop)
+    await app.run()
+
+
 def main(argv: list[str] | None = None) -> None:
     """Run the console-script entry point."""
     args = parse_args(argv)
@@ -56,17 +74,11 @@ def main(argv: list[str] | None = None) -> None:
         level=args.log_level,
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     )
-    args.data_dir.mkdir(parents=True, exist_ok=True)
     LOGGER.info("%s %s starting", DISPLAY_NAME, get_version())
-    LOGGER.info("Data directory: %s | web port: %d", args.data_dir.resolve(), args.web_port)
-    # TODO: wire up the service core once the architecture is finalized:
-    #   - virtual Hue bridge (SSDP/UPnP responder + legacy v1 REST emulator)
-    #   - web configuration UI
-    #   - Hue Entertainment streaming client (DTLS/PSK) to the real bridge
-    LOGGER.warning(
-        "Service core not implemented yet — this is a project skeleton. "
-        "Nothing is listening; the bridge components will be wired up next.",
-    )
+    try:
+        asyncio.run(_serve(args))
+    except KeyboardInterrupt:
+        LOGGER.info("Shutting down")
 
 
 if __name__ == "__main__":

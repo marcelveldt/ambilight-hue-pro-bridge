@@ -19,7 +19,7 @@ def test_version_is_a_string() -> None:
 def test_argument_parsing_defaults() -> None:
     """The CLI parser exposes the expected defaults."""
     args = parse_args([])
-    assert args.web_port > 0
+    assert args.http_port is None
     assert args.log_level == "INFO"
 
 

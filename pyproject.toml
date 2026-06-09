@@ -13,12 +13,14 @@ classifiers = [
 dependencies = [
   "aiohttp>=3.9",
   "orjson>=3.9",
+  "mashumaro>=3.13",
+  "pyyaml>=6.0",
   # Outbound Hue Entertainment streaming client (DTLS/PSK + HueStream), shared with
   # Music Assistant. During local development it is installed editable from the sibling
   # checkout (see scripts/setup.sh); CI/users get it from PyPI.
   "hue-entertainment",
-  # NOTE: the virtual-bridge/discovery layer (SSDP responder, mDNS) may add deps
-  # (e.g. zeroconf) once those modules land — see docs/ARCHITECTURE.md.
+  # NOTE: mDNS (zeroconf) may be added when the _hue._tcp responder lands — see
+  # docs/ARCHITECTURE.md.
 ]
 description = "Bridge older Philips Ambilight+Hue TVs to modern Philips Hue (V2/Pro) bridges via the Entertainment API."
 license = {text = "Apache-2.0"}
@@ -129,9 +131,18 @@ ignore = [
   "COM812", # Conflicts with the Ruff formatter
   "ISC001", # Conflicts with the Ruff formatter
   "FBT001", # Very opniated and not useful
+  "A003", # Intentional: dataclass `id` fields match the Hue/CLIP resource naming
+  "S104", # We intentionally bind all interfaces (LAN service / SSDP multicast)
+  "ERA001", # False positives on byte-layout / documentation comments
+  "TC001", # With `from __future__ import annotations`, runtime import cost is nil
+  "TC003", # idem (stdlib typing-only imports)
 ]
 
 select = ["ALL"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests poke at private members, use magic values, and use loosely-typed fixtures.
+"tests/*" = ["SLF001", "PLR2004", "ANN001"]
 
 [tool.ruff.lint.flake8-pytest-style]
 fixture-parentheses = false
