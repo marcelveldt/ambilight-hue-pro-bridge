@@ -20,7 +20,7 @@ _RGB16_MAX = 65535
 
 @dataclass
 class FrameColor:
-    """A single decoded colour from a HueStream frame."""
+    """A single decoded color from a HueStream frame."""
 
     target: int  # light id (HueStream v1) or channel id (HueStream v2)
     rgb: tuple[int, int, int]  # 16-bit per channel
@@ -54,6 +54,9 @@ def decode_huestream(data: bytes) -> DecodedFrame | None:
         else:
             target = int.from_bytes(data[offset + 1 : offset + 3], "big")
             color_at = offset + 3
+            # In v1 a light id of 0 terminates the light list (matches diyHue/real bridges).
+            if target == 0:
+                break
         first = int.from_bytes(data[color_at : color_at + 2], "big")
         second = int.from_bytes(data[color_at + 2 : color_at + 4], "big")
         third = int.from_bytes(data[color_at + 4 : color_at + 6], "big")
@@ -63,7 +66,7 @@ def decode_huestream(data: bytes) -> DecodedFrame | None:
 
 
 def _to_rgb16(colorspace: int, first: int, second: int, third: int) -> tuple[int, int, int]:
-    """Convert a frame's three 16-bit values to RGB according to the colour space."""
+    """Convert a frame's three 16-bit values to RGB according to the color space."""
     if colorspace == _COLORSPACE_XY:
         return xy_brightness_to_rgb16(first / _RGB16_MAX, second / _RGB16_MAX, third / _RGB16_MAX)
     return (first, second, third)

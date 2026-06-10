@@ -74,15 +74,16 @@ The service is built from a few focused, decoupled components:
 - **Mapping engine** — maps the TV's exposed (virtual) lights onto the channels of a
   real entertainment area, including splitting one gradient strip into N zones.
 - **Entertainment client** — connects to the real bridge and streams `HueStream` frames
-  over DTLS/PSK. This is being extracted from Music Assistant's battle-tested
-  `hue_entertainment` core (pure-Python DTLS 1.2 PSK + `HueStream` v2 encoder, already
-  *"working and tested on Hue Bridge V2 and Hue Bridge Pro"*) into a standalone library
-  that both projects can share.
-- **Web UI + config store** — pair the real bridge, pick the entertainment area, choose
-  exposed lights, and configure the gradient → multi-zone mapping.
+  over DTLS/PSK, via the shared
+  [music-assistant/hue-entertainment](https://github.com/music-assistant/hue-entertainment)
+  library (pure-Python DTLS 1.2 PSK + `HueStream` encoder, *"working and tested on Hue
+  Bridge V2 and Hue Bridge Pro"*).
+- **Web UI + config store** — pair the real bridge, then assign each paired TV an
+  entertainment area (optionally splitting its gradient strips into per-zone virtual
+  lights). A TV has no lights until it's assigned an area.
 
-> Detailed protocol notes and the module map live in `docs/` (added as the design is
-> finalized).
+> Detailed protocol notes and the module map live in
+> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Installation
 
@@ -98,14 +99,19 @@ Requires Python 3.13+.
 # create a virtualenv, install the package + dev deps, and set up pre-commit
 scripts/setup.sh
 
-# run the service (port 80 needs privileges; use --http-port for a quick local test)
-sudo ambilight-hue-bridge --log-level DEBUG
-# or: python -m ambilight_hue_bridge --http-port 8081 --log-level DEBUG
+# run the service — the Hue API and web UI share one port (--http-port, default 8080),
+# plus a TLS listener with a Hue-style cert (--https-port, default 443; 0 disables it).
+# Discovery (SSDP on UDP 1900 + mDNS _hue._tcp) runs alongside, always on.
+python -m ambilight_hue_bridge --log-level DEBUG
 
-# then open the web UI at http://<host>:8080 to pair your Hue bridge (press the
-# link button first) and select its entertainment area.
-# A `pair` / `areas` CLI is also available for headless setup. For now, set each
-# virtual light's `channels` in data/config.yaml (the mapping UI is still WIP).
+# older Ambilight TVs assume the Hue API is on port 80; newer firmware connects over
+# HTTPS on 443. Serve both (binding 80/443 needs privileges):
+sudo ambilight-hue-bridge --http-port 80 --https-port 443 --log-level DEBUG
+
+# then open the web UI at http://<host>:<http-port> (e.g. http://<host>:8080) to pair
+# your Hue bridge (press the link button first). A freshly paired TV has no lights;
+# assign it an entertainment area in the UI to expose that area's lights. A
+# `pair` / `areas` CLI is also available for headless setup.
 
 # run the checks
 pre-commit run --all-files
@@ -123,9 +129,10 @@ project follows the conventions of [aiohue](https://github.com/home-assistant-li
 - [x] Virtual bridge: SSDP/UPnP discovery + legacy v1 REST emulation + pairing
 - [x] Outbound engine: v1 state → RGB, ingest buffer, channel mapping, on-demand streaming
 - [ ] Verify the TV ↔ bridge wire protocol against a real TV (capture via the request log)
-- [x] Web configuration UI — bridge discovery + pairing + entertainment-area selection
+- [x] Web configuration UI — bridge discovery + pairing + per-TV area assignment
 - [x] Inbound DTLS server (UDP 2100) for newer Android Ambilight TVs (pure-Python DTLS-PSK)
-- [ ] Web UI: gradient / light → channel mapping (channels are config-file only for now)
+- [x] mDNS `_hue._tcp` advertisement + local N-UPnP endpoint (additive LAN discovery)
+- [x] Web UI: per-TV entertainment-area assignment (optional gradient-zone split)
 - [ ] Docker image (multi-arch)
 - [ ] Home Assistant OS add-on
 

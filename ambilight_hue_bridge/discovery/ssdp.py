@@ -45,7 +45,12 @@ class SSDPServer(asyncio.DatagramProtocol):
         loop = asyncio.get_running_loop()
         await loop.create_datagram_endpoint(lambda: self, sock=sock)
         self._notify_task = asyncio.create_task(self._notify_loop())
-        LOGGER.info("SSDP responder listening on %s:%d", SSDP_MCAST_ADDR, SSDP_PORT)
+        LOGGER.info(
+            "SSDP responder listening on %s:%d, advertising %s",
+            SSDP_MCAST_ADDR,
+            SSDP_PORT,
+            self._location(),
+        )
 
     async def stop(self) -> None:
         """Stop advertising and close the socket."""
@@ -65,16 +70,31 @@ class SSDPServer(asyncio.DatagramProtocol):
     def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
         """Reply to SSDP ``M-SEARCH`` discovery requests with our device descriptors."""
         message = data.decode("utf-8", errors="ignore")
-        if "M-SEARCH" not in message or "ssdp:discover" not in message:
+        if "M-SEARCH" not in message:
             return
+        if "ssdp:discover" not in message:
+            LOGGER.debug("SSDP ignored non-discover datagram from %s:%d", addr[0], addr[1])
+            return
+        search_target = _header_value(message, "ST") or "?"
+        LOGGER.info(
+            "SSDP M-SEARCH from %s:%d (ST=%s) - responding", addr[0], addr[1], search_target
+        )
         if self._transport is None:
             return
-        for response in self._search_responses():
+        responses = self._search_responses()
+        for response in responses:
             self._transport.sendto(response, addr)
+        LOGGER.debug(
+            "SSDP sent %d response variant(s) to %s:%d, LOCATION=%s",
+            len(responses),
+            addr[0],
+            addr[1],
+            self._location(),
+        )
 
     def error_received(self, exc: Exception) -> None:
         """Log transport errors without crashing the responder."""
-        LOGGER.debug("SSDP transport error: %s", exc)
+        LOGGER.warning("SSDP transport error: %s", exc)
 
     def _create_socket(self) -> socket.socket:
         """Create the bound, multicast-joined UDP socket."""
@@ -83,24 +103,61 @@ class SSDPServer(asyncio.DatagramProtocol):
         with suppress(AttributeError, OSError):
             # Not available on every platform; harmless when missing.
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        sock.bind(("", SSDP_PORT))
-        mreq = socket.inet_aton(SSDP_MCAST_ADDR) + socket.inet_aton(self._host_ip)
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        try:
+            sock.bind(("", SSDP_PORT))
+        except OSError as err:
+            sock.close()
+            msg = (
+                f"Failed to bind SSDP UDP port {SSDP_PORT} - another SSDP service "
+                "(Home Assistant, miniupnpd, another bridge instance) may already own it"
+            )
+            raise OSError(msg) from err
+        # Join the discovery group on the advertised interface AND on INADDR_ANY, so the
+        # TV's M-SEARCH is received regardless of which NIC the host auto-detection picked
+        # (a wrong single-interface join is a classic "the bridge never hears the TV" bug).
+        joined: list[str] = []
+        for interface in (self._host_ip, "0.0.0.0"):
+            try:
+                mreq = socket.inet_aton(SSDP_MCAST_ADDR) + socket.inet_aton(interface)
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+                joined.append(interface)
+            except OSError as err:
+                LOGGER.debug("SSDP could not join %s on %s: %s", SSDP_MCAST_ADDR, interface, err)
+        if not joined:
+            sock.close()
+            msg = f"Failed to join SSDP multicast group {SSDP_MCAST_ADDR} on any interface"
+            raise OSError(msg)
+        # Pin outbound multicast (NOTIFY) to the advertised LAN interface.
+        with suppress(OSError):
+            sock.setsockopt(
+                socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self._host_ip)
+            )
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, _MULTICAST_TTL)
+        LOGGER.info("SSDP joined %s on interface(s): %s", SSDP_MCAST_ADDR, ", ".join(joined))
         return sock
 
     async def _notify_loop(self) -> None:
         """Broadcast ssdp:alive NOTIFY messages on an interval (helps some TVs discover us)."""
         while True:
-            self._send_notify()
+            # A transient multicast send error (e.g. an interface flap) must not kill the
+            # advertising loop for the rest of the process lifetime.
+            with suppress(OSError):
+                self._send_notify()
             await asyncio.sleep(SSDP_NOTIFY_INTERVAL)
 
     def _send_notify(self) -> None:
         """Send one round of ssdp:alive NOTIFY datagrams to the multicast group."""
         if self._transport is None:
             return
-        for message in self._notify_messages():
+        messages = self._notify_messages()
+        for message in messages:
             self._transport.sendto(message, (SSDP_MCAST_ADDR, SSDP_PORT))
+        LOGGER.debug(
+            "SSDP broadcast %d ssdp:alive NOTIFY to %s:%d",
+            len(messages),
+            SSDP_MCAST_ADDR,
+            SSDP_PORT,
+        )
 
     def _variants(self) -> list[tuple[str, str]]:
         """Return the (ST/NT, USN) pairs a real Hue bridge advertises."""
@@ -154,3 +211,17 @@ class SSDPServer(asyncio.DatagramProtocol):
             )
             messages.append(message.encode("utf-8"))
         return messages
+
+
+def _header_value(message: str, name: str) -> str | None:
+    """
+    Return an HTTP header value from a raw SSDP message, matched case-insensitively.
+
+    :param message: The decoded SSDP request text.
+    :param name: The header name to look up (e.g. ``ST``).
+    """
+    prefix = f"{name.lower()}:"
+    for line in message.splitlines():
+        if line.lower().startswith(prefix):
+            return line[len(prefix) :].strip()
+    return None

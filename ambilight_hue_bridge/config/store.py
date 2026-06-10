@@ -42,7 +42,14 @@ class ConfigStore:
         return self._config
 
     def save(self) -> None:
-        """Persist the current configuration to disk atomically."""
+        """
+        Persist the current configuration to disk atomically.
+
+        Synchronous on purpose: it is only called from control-plane actions (pairing, a
+        settings change, adding/removing a bridge, assigning a TV) and never the streaming
+        hot path. The YAML is a few KB, so the write is sub-millisecond and offloading it off
+        the event loop would add complexity without a measurable benefit.
+        """
         self._path.parent.mkdir(parents=True, exist_ok=True)
         serialized = self._config.to_yaml()
         data = serialized.encode("utf-8") if isinstance(serialized, str) else serialized

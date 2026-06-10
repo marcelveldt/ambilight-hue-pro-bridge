@@ -33,12 +33,17 @@
   <h1 id="title">Ambilight+Hue Pro Bridge</h1>
   <p class="muted" id="subtitle">Loading…</p>
 
-  <h2>Hue bridges</h2>
-  <p class="muted">
-    Pair the real Hue bridge to stream to. Click <em>Discover</em> to find bridges on your
-    network (or type the IP), press the link button on the bridge, then click <em>Pair</em>.
+  <p class="muted" id="intro">
+    This service poses as a Philips Hue bridge so your TV's <em>Ambilight+Hue</em> can connect to
+    it. Pair your real Hue bridge below, then give each TV an entertainment area to control — the
+    TV arranges those lights around its screen and we forward the colours to your bridge.
   </p>
 
+  <h2>① Your Hue bridge</h2>
+  <p class="muted">
+    The real Hue bridge your lights live on — where we send the TV's colours. Press its link
+    button, then <em>Pair</em> (or <em>Discover</em> it on the network).
+  </p>
   <div class="card">
     <div class="row">
       <input id="host" type="text" placeholder="192.168.1.50" size="16" />
@@ -48,21 +53,32 @@
     </div>
     <div id="discovered" class="row" style="margin-top:.5rem"></div>
   </div>
-
   <div id="bridges"></div>
 
-  <h2>Exposed lights</h2>
+  <h2>② TVs &amp; their lights</h2>
   <p class="muted">
-    Lights the TV sees — mirrored from the selected entertainment area (one per zone, named
-    after the real light). Edit names/positions or remap channels below, or
-    <em>Reset to mirror</em> to rebuild them from the area.
+    Each paired TV controls one <em>entertainment area</em> from your Hue bridge — just the set of
+    lights it drives (positions set in the Hue app are ignored; the TV places them itself). Tick
+    <em>split gradient zones</em> to expose each zone of a gradient strip as its own light. Only
+    one TV streams at a time.
   </p>
-  <div class="row" style="margin-bottom:.6rem">
-    <button onclick="addLight()">Add light</button>
-    <button onclick="autoMap()">Reset to mirror</button>
-    <span class="muted" id="lights-status"></span>
+  <div id="tvs"><p class="muted">No TVs paired yet — add this bridge from the TV's Ambilight+Hue menu.</p></div>
+
+  <h2>③ Smoothness</h2>
+  <p class="muted">
+    Eases the TV's abrupt Ambilight colours into fades. Higher = smoother but more lag;
+    0 = off (snappy but steppy). Smoothing applies live; the rate applies on restart.
+  </p>
+  <div class="card">
+    <div class="row">
+      <label for="smoothing">Smoothing</label>
+      <input id="smoothing" type="range" min="0" max="0.95" step="0.05" style="flex:1" oninput="onSmoothing()" />
+      <span id="smoothing-val" class="badge">0.50</span>
+      <span class="spacer"></span>
+      <label for="rate">Rate</label>
+      <input id="rate" type="number" min="1" max="60" size="3" onchange="onRate()" /><span class="muted">Hz</span>
+    </div>
   </div>
-  <div id="lights"></div>
 </main>
 
 <script>
@@ -74,7 +90,7 @@ async function api(path, opts) {
 }
 
 async function loadStatus() {
-  const s = await api("/api/status");
+  const s = await api("/cfg/status");
   document.getElementById("title").textContent = s.name;
   const streaming = s.streaming ? "● streaming" : "○ idle";
   document.getElementById("subtitle").textContent =
@@ -82,7 +98,7 @@ async function loadStatus() {
 }
 
 async function loadBridges() {
-  const bridges = await api("/api/bridges");
+  const bridges = await api("/cfg/bridges");
   const container = document.getElementById("bridges");
   container.innerHTML = bridges.length ? "" : '<p class="muted">No bridges paired yet.</p>';
   for (const b of bridges) container.appendChild(renderBridge(b));
@@ -95,53 +111,15 @@ function renderBridge(b) {
   const badges = (b.paired ? '<span class="badge on">paired</span> ' : "")
     + (b.active ? '<span class="badge active">active</span>' : "");
   card.innerHTML = `<div class="row"><strong>${b.host}</strong> <span class="muted">${b.model}</span>`
-    + `<span class="spacer"></span>${badges}</div>`
-    + `<div class="row" style="margin-top:.6rem">`
-    + `<span class="muted">Entertainment area</span>`
-    + `<select data-area><option value="">— loading… —</option></select>`
-    + `<span class="spacer"></span><button data-del>Remove</button></div>`
+    + `<span class="spacer"></span>${badges}<button data-del>Remove</button></div>`
     + `<span class="error" data-err></span>`;
-
-  const sel = card.querySelector("[data-area]");
   const err = card.querySelector("[data-err]");
-  const setErr = (e) => { err.textContent = e ? String(e.message || e) : ""; };
-
-  // Load the bridge's areas automatically and pre-select the saved one.
-  (async () => {
-    try {
-      const areas = await api(`/api/bridges/${b.id}/areas`);
-      sel.innerHTML = '<option value="">— select entertainment area —</option>';
-      for (const a of areas) {
-        const opt = document.createElement("option");
-        opt.value = a.id;
-        opt.textContent = `${a.name} (${a.channels.length} zones)`;
-        if (a.id === b.entertainment_area) opt.selected = true;
-        sel.appendChild(opt);
-      }
-    } catch (e) {
-      sel.innerHTML = '<option value="">— could not load areas —</option>';
-      setErr(e);
-    }
-  })();
-
-  // Selecting an area saves it, activates the bridge, and (by default) mirrors it.
-  sel.onchange = async () => {
-    setErr();
-    try {
-      await api(`/api/bridges/${b.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ entertainment_area: sel.value, active: true }),
-      });
-      await refresh();
-    } catch (e) { setErr(e); }
-  };
   card.querySelector("[data-del]").onclick = async () => {
-    setErr();
+    err.textContent = "";
     try {
-      await api(`/api/bridges/${b.id}`, { method: "DELETE" });
+      await api(`/cfg/bridges/${b.id}`, { method: "DELETE" });
       await refresh();
-    } catch (e) { setErr(e); }
+    } catch (e) { err.textContent = String(e.message || e); }
   };
   return card;
 }
@@ -155,7 +133,7 @@ async function pair() {
   btn.disabled = true;
   status.textContent = "Press the link button on the bridge… (waiting up to 30s)";
   try {
-    await api("/api/bridges/pair", {
+    await api("/cfg/bridges/pair", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ host }),
@@ -178,7 +156,7 @@ async function discover() {
   btn.disabled = true;
   out.innerHTML = '<span class="muted">Searching for bridges… (a few seconds)</span>';
   try {
-    const found = await api("/api/discover");
+    const found = await api("/cfg/discover");
     if (!found.length) { out.innerHTML = '<span class="muted">No bridges found.</span>'; return; }
     out.innerHTML = "";
     for (const b of found) {
@@ -195,99 +173,99 @@ async function discover() {
   }
 }
 
-let channelsCache = [];
-const POSITIONS = ["left", "right", "center", "top", "bottom", "behind"];
+async function loadSettings() {
+  const s = await api("/cfg/settings");
+  document.getElementById("smoothing").value = s.stream_smoothing;
+  document.getElementById("smoothing-val").textContent = Number(s.stream_smoothing).toFixed(2);
+  document.getElementById("rate").value = s.stream_rate_hz;
+}
 
-async function loadChannels() {
-  try {
-    const data = await api("/api/channels");
-    channelsCache = data.channels || [];
-  } catch {
-    channelsCache = [];
+let smoothingTimer = null;
+function onSmoothing() {
+  const v = Number(document.getElementById("smoothing").value);
+  document.getElementById("smoothing-val").textContent = v.toFixed(2);
+  // Debounce the live PUT while the slider is dragged.
+  clearTimeout(smoothingTimer);
+  smoothingTimer = setTimeout(() => putSettings({ stream_smoothing: v }), 150);
+}
+
+function onRate() {
+  putSettings({ stream_rate_hz: Number(document.getElementById("rate").value) });
+}
+
+function putSettings(body) {
+  return api("/cfg/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(() => {});
+}
+
+async function loadTvs() {
+  const [tvs, areas] = await Promise.all([api("/cfg/tvs"), api("/cfg/areas")]);
+  const container = document.getElementById("tvs");
+  container.innerHTML = "";
+  if (!tvs.length) {
+    container.innerHTML =
+      '<p class="muted">No TVs paired yet — add this bridge from the TV\'s Ambilight+Hue menu.</p>';
+    return;
   }
+  for (const tv of tvs) container.appendChild(renderTv(tv, areas));
 }
 
-async function loadLights() {
-  const lights = await api("/api/lights");
-  const container = document.getElementById("lights");
-  container.innerHTML = lights.length
-    ? "" : '<p class="muted">No lights yet — click “Add light” or “One light per channel”.</p>';
-  for (const light of lights) container.appendChild(renderLight(light));
-  document.getElementById("lights-status").textContent =
-    channelsCache.length ? "" : "Select an entertainment area above to map channels.";
-}
-
-function renderLight(light) {
+function renderTv(tv, areas) {
   const card = document.createElement("div");
   card.className = "card";
-  const opts = POSITIONS.map(
-    (p) => `<option value="${p}"${p === light.position ? " selected" : ""}>${p}</option>`,
+  const badge = tv.streaming
+    ? '<span class="badge on">● streaming</span>'
+    : '<span class="badge">idle</span>';
+  const opts = ['<option value="">— not assigned (no lights) —</option>'].concat(
+    areas.map((a) =>
+      `<option value="${a.id}"${a.id === tv.entertainment_area ? " selected" : ""}>`
+      + `${a.name} (${a.channels} lights)</option>`),
   ).join("");
-  const checks = channelsCache.length
-    ? channelsCache.map((c) => {
-        const on = light.channels.includes(c.channel_id) ? " checked" : "";
-        return `<label class="badge"><input type="checkbox" data-ch value="${c.channel_id}"${on}/> ${c.name || ("ch " + c.channel_id)}</label>`;
-      }).join(" ")
-    : '<span class="muted">no channels — select an entertainment area first</span>';
+  const lights = (tv.lights && tv.lights.length)
+    ? tv.lights.join(", ")
+    : "— none yet; pick an area above to give this TV its lights";
   card.innerHTML =
-    `<div class="row"><input data-name size="18"/> <select data-pos>${opts}</select>`
-    + `<span class="muted">id ${light.id}</span><span class="spacer"></span>`
-    + `<button data-save class="primary">Save</button><button data-del>Remove</button></div>`
-    + `<div class="row" style="margin-top:.5rem;flex-wrap:wrap">${checks}</div>`
+    `<div class="row"><strong>${tv.devicetype || "TV"}</strong>`
+    + `<span class="muted">${tv.created ? "paired " + tv.created : ""}</span>`
+    + `<span class="spacer"></span>${badge}</div>`
+    + `<div class="row" style="margin-top:.6rem"><span class="muted">Controls area</span>`
+    + `<select data-area>${opts}</select>`
+    + `<label class="badge"><input type="checkbox" data-split${tv.split_gradients ? " checked" : ""}/>`
+    + ` split gradient zones</label></div>`
+    + `<div class="row" style="margin-top:.3rem"><span class="muted">Lights: ${lights}</span></div>`
     + `<span class="error" data-err></span>`;
-  card.querySelector("[data-name]").value = light.name;
+  const sel = card.querySelector("[data-area]");
+  const split = card.querySelector("[data-split]");
   const err = card.querySelector("[data-err]");
-  card.querySelector("[data-save]").onclick = async () => {
+  const save = async () => {
     err.textContent = "";
-    const channels = [...card.querySelectorAll("[data-ch]:checked")].map((el) => Number(el.value));
     try {
-      await api(`/api/lights/${light.id}`, {
+      await api(`/cfg/tvs/${encodeURIComponent(tv.username)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: card.querySelector("[data-name]").value,
-          position: card.querySelector("[data-pos]").value,
-          channels,
-        }),
+        body: JSON.stringify({ entertainment_area: sel.value, split_gradients: split.checked }),
       });
-      await loadLights();
+      await loadTvs();
     } catch (e) { err.textContent = String(e.message || e); }
   };
-  card.querySelector("[data-del]").onclick = async () => {
-    try { await api(`/api/lights/${light.id}`, { method: "DELETE" }); await loadLights(); }
-    catch (e) { err.textContent = String(e.message || e); }
-  };
+  sel.onchange = save;
+  split.onchange = save;
   return card;
-}
-
-async function addLight() {
-  await api("/api/lights", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-  await loadLights();
-}
-
-async function autoMap() {
-  if (!confirm("Rebuild the exposed lights by mirroring the active area? This replaces the current lights.")) return;
-  const status = document.getElementById("lights-status");
-  status.textContent = "Mapping…";
-  try {
-    await api("/api/lights/auto-map", { method: "POST" });
-    await loadLights();
-    status.textContent = "";
-  } catch (e) {
-    status.textContent = String(e.message || e);
-  }
 }
 
 async function refresh() {
   const [, bridges] = await Promise.all([loadStatus(), loadBridges()]);
-  await loadChannels();
-  await loadLights();
+  await loadSettings();
+  await loadTvs();
   // First-run convenience: scan for bridges automatically when none are configured yet.
   if (!bridges.length) discover();
 }
 
 refresh().catch((e) => { document.getElementById("subtitle").textContent = "Error: " + e.message; });
-setInterval(() => loadStatus().catch(() => {}), 4000);
+setInterval(() => { loadStatus().catch(() => {}); loadTvs().catch(() => {}); }, 4000);
 </script>
 </body>
 </html>

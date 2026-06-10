@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ambilight_hue_bridge
 from ambilight_hue_bridge.__main__ import get_version, main, parse_args
+from ambilight_hue_bridge.const import DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT
 
 
 def test_package_imports() -> None:
@@ -19,7 +20,8 @@ def test_version_is_a_string() -> None:
 def test_argument_parsing_defaults() -> None:
     """The CLI parser exposes the expected defaults."""
     args = parse_args([])
-    assert args.http_port is None
+    assert args.http_port == DEFAULT_HTTP_PORT
+    assert args.https_port == DEFAULT_HTTPS_PORT
     assert args.log_level == "INFO"
 
 

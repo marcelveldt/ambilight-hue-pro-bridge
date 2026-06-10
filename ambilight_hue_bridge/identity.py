@@ -34,8 +34,14 @@ def bridge_id(mac: str) -> str:
 
 
 def bridge_serial(mac: str) -> str:
-    """Return the bridge serial (the normalized 12-hex MAC) used in the UPnP UDN."""
-    return normalize_mac(mac)
+    """
+    Return the bridge serial used in the descriptor and UPnP UDN.
+
+    A real Hue bridge's serial equals its ``bridgeid`` (first6 + ``FFFE`` + last6),
+    lowercased - NOT the bare MAC. Keeping the serial/UDN consistent with the advertised
+    ``hue-bridgeid`` is required for Hue-aware clients (e.g. Ambilight+Hue TVs) to accept us.
+    """
+    return bridge_id(mac).lower()
 
 
 def bridge_udn(mac: str) -> str:

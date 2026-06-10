@@ -11,13 +11,19 @@ DISPLAY_NAME: Final = "Ambilight+Hue Pro Bridge"
 DEFAULT_DATA_DIR: Final = "data"
 CONFIG_FILENAME: Final = "config.yaml"
 
-# The virtual bridge serves the legacy Hue v1 REST API and the UPnP descriptor on this
-# TCP port. A real Hue bridge always uses port 80, and some TVs assume it, so 80 is the
-# faithful default (running on it needs privileges; the HA add-on runs as root).
-DEFAULT_HTTP_PORT: Final = 80
+# Single HTTP port serving the TV-facing Hue API + descriptor AND the web UI. This is a
+# command-line option only (never persisted). 8080 is a convenient default; older
+# Ambilight+Hue TVs assume the Hue bridge is on port 80, so run with --http-port 80 for them.
+DEFAULT_HTTP_PORT: Final = 8080
 
-# The web configuration UI is served on its own port (kept off the TV-facing v1 API).
-DEFAULT_WEB_UI_PORT: Final = 8080
+# HTTPS port serving the same app with a Hue-style self-signed certificate. Newer Hue clients
+# (incl. recent Ambilight+Hue TV firmware) discover via mDNS and connect over TLS, so a real
+# bridge advertises _hue._tcp on 443. Command-line only; 0 disables the HTTPS listener.
+DEFAULT_HTTPS_PORT: Final = 443
+
+# Filenames for the persisted bridge TLS certificate (generated once, then pinned by clients).
+CERT_FILENAME: Final = "bridge_cert.pem"
+CERT_KEY_FILENAME: Final = "bridge_key.pem"
 
 # SSDP / UPnP discovery.
 SSDP_MCAST_ADDR: Final = "239.255.255.250"
@@ -34,6 +40,14 @@ BRIDGE_DATASTORE_VERSION: Final = "126"
 # UPnP UDN/USN are built as uuid:<UDN_PREFIX><serial>, matching a real Hue bridge.
 UDN_PREFIX: Final = "2f402f80-da50-11e1-9b23-"
 UPNP_SERVER: Final = "Linux/3.14.0 UPnP/1.0 IpBridge/1.67.0"
+
+# Outbound streaming bounds, shared by the engine clamp and the web settings API. The Hue
+# bridge tops out around 50-60 Hz; smoothing is capped below 1.0 because 1.0 would mean the
+# eased color never converges on its target (a frozen output).
+DEFAULT_STREAM_RATE_HZ: Final = 50
+MIN_STREAM_RATE_HZ: Final = 1
+MAX_STREAM_RATE_HZ: Final = 60
+MAX_STREAM_SMOOTHING: Final = 0.95
 
 # devicetype registered with the real bridge when pairing; shown in the Hue app's list of
 # connected apps (format "appname#devicename").

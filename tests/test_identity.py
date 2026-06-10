@@ -31,9 +31,9 @@ def test_bridge_id_inserts_fffe_and_uppercases() -> None:
 
 
 def test_bridge_serial_and_udn() -> None:
-    """The serial is the normalized MAC and the UDN embeds it."""
-    assert bridge_serial("AA:BB:CC:DD:EE:FF") == "aabbccddeeff"
-    assert bridge_udn("aabbccddeeff") == "uuid:2f402f80-da50-11e1-9b23-aabbccddeeff"
+    """The serial equals the bridgeid (with FFFE) lowercased, and the UDN embeds it."""
+    assert bridge_serial("AA:BB:CC:DD:EE:FF") == "aabbccfffeddeeff"
+    assert bridge_udn("aabbccddeeff") == "uuid:2f402f80-da50-11e1-9b23-aabbccfffeddeeff"
 
 
 def test_mac_with_colons() -> None:

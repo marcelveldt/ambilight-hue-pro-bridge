@@ -12,7 +12,14 @@ from pathlib import Path
 
 from .app import BridgeApp
 from .config.store import ConfigStore
-from .const import CONFIG_FILENAME, DEFAULT_DATA_DIR, DISPLAY_NAME, PACKAGE_NAME
+from .const import (
+    CONFIG_FILENAME,
+    DEFAULT_DATA_DIR,
+    DEFAULT_HTTP_PORT,
+    DEFAULT_HTTPS_PORT,
+    DISPLAY_NAME,
+    PACKAGE_NAME,
+)
 from .outbound.controller import active_bridge, list_areas, pair_and_store
 
 LOGGER = logging.getLogger(PACKAGE_NAME)
@@ -42,8 +49,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--http-port",
         type=int,
-        default=None,
-        help="Override the virtual bridge HTTP port (default: from config, 80).",
+        default=DEFAULT_HTTP_PORT,
+        help=(
+            f"TCP port for the Hue API + web UI (default: {DEFAULT_HTTP_PORT}). "
+            "Use 80 for older Ambilight+Hue TVs, which assume the bridge is on port 80."
+        ),
+    )
+    parser.add_argument(
+        "--https-port",
+        type=int,
+        default=DEFAULT_HTTPS_PORT,
+        help=(
+            f"TCP port for the TLS listener with a Hue-style cert (default: {DEFAULT_HTTPS_PORT}; "
+            "0 disables it). Newer Ambilight+Hue TVs discover via mDNS and connect over HTTPS."
+        ),
     )
     parser.add_argument(
         "--log-level",
@@ -71,16 +90,16 @@ def main(argv: list[str] | None = None) -> None:
     if command == "serve":
         LOGGER.info("%s %s starting", DISPLAY_NAME, get_version())
         with suppress(KeyboardInterrupt):
-            asyncio.run(_serve(args.data_dir, args.http_port))
+            asyncio.run(_serve(args.data_dir, args.http_port, args.https_port))
     elif command == "pair":
         asyncio.run(_pair(args.data_dir, args.host))
     elif command == "areas":
         asyncio.run(_areas(args.data_dir))
 
 
-async def _serve(data_dir: Path, http_port: int | None) -> None:
+async def _serve(data_dir: Path, http_port: int, https_port: int) -> None:
     """Run the bridge service until a stop signal is received."""
-    app = BridgeApp(data_dir, http_port=http_port)
+    app = BridgeApp(data_dir, http_port=http_port, https_port=https_port)
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         with suppress(NotImplementedError):
@@ -94,9 +113,8 @@ async def _pair(data_dir: Path, host: str) -> None:
     store = ConfigStore(data_dir / CONFIG_FILENAME)
     store.load()
     bridge = await pair_and_store(store, host)
-    config_path = data_dir / CONFIG_FILENAME
     print(f"Paired bridge '{bridge.id}' at {host}.")
-    print(f"Next: run 'areas', then edit 'entertainment_area' and 'channels' in {config_path}.")
+    print("Next: open the web UI and assign each paired TV an entertainment area.")
 
 
 async def _areas(data_dir: Path) -> None:

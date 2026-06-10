@@ -113,9 +113,14 @@ class HueDtlsServer:
 
     def _run(self) -> None:
         """Receive datagrams and drive the handshake / application-data state machine."""
-        while self._running and self._sock is not None:
+        while self._running:
+            # Snapshot the socket: stop() (on the event loop) nulls self._sock, which could
+            # otherwise race this thread between the loop guard and the recvfrom call.
+            sock = self._sock
+            if sock is None:
+                break
             try:
-                data, addr = self._sock.recvfrom(4096)
+                data, addr = sock.recvfrom(4096)
             except TimeoutError:
                 continue
             except OSError:
@@ -216,6 +221,11 @@ class HueDtlsServer:
     def _decrypt(self, content_type: int, fragment: bytes) -> bytes:
         """Decrypt an AES-128-GCM record fragment sent by the client."""
         assert self._aesgcm_in is not None
+        # A valid record is an 8-byte explicit nonce + ciphertext + 16-byte GCM tag; drop
+        # anything shorter rather than computing a negative plaintext length and a bad AAD.
+        if len(fragment) < 8 + 16:
+            msg = "DTLS application-data record too short"
+            raise ValueError(msg)
         explicit_nonce = fragment[0:8]
         ciphertext = fragment[8:]
         nonce = self._client_write_iv + explicit_nonce

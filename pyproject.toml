@@ -19,8 +19,10 @@ dependencies = [
   # Music Assistant. During local development it is installed editable from the sibling
   # checkout (see scripts/setup.sh); CI/users get it from PyPI.
   "hue-entertainment",
-  # NOTE: mDNS (zeroconf) may be added when the _hue._tcp responder lands — see
-  # docs/ARCHITECTURE.md.
+  # Hue-style self-signed TLS cert for the HTTPS listener (newer TVs connect over TLS).
+  "cryptography>=42",
+  # mDNS/DNS-SD advertisement of _hue._tcp so newer Hue clients can also discover us.
+  "zeroconf>=0.130",
 ]
 description = "Bridge older Philips Ambilight+Hue TVs to modern Philips Hue (V2/Pro) bridges via the Entertainment API."
 license = {text = "Apache-2.0"}

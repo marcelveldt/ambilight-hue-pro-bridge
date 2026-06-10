@@ -6,6 +6,8 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from ambilight_hue_bridge.outbound.controller import tv_lights
+
 from .dtls_server import HueDtlsServer
 from .huestream import decode_huestream
 
@@ -22,7 +24,7 @@ _HUE_ENTERTAINMENT_PORT = 2100
 
 
 class InboundStreamer:
-    """Runs the inbound DTLS server and forwards decoded colours to the engine."""
+    """Runs the inbound DTLS server and forwards decoded colors to the engine."""
 
     def __init__(
         self,
@@ -37,7 +39,7 @@ class InboundStreamer:
 
         :param store: Config store providing the virtual lights.
         :param pairing: Pairing manager used to look up the PSK by username.
-        :param engine: Engine that receives the decoded colours.
+        :param engine: Engine that receives the decoded colors.
         :param port: UDP port to listen on for the entertainment stream.
         """
         self._store = store
@@ -45,6 +47,10 @@ class InboundStreamer:
         self._engine = engine
         self._port = port
         self._server: HueDtlsServer | None = None
+        # One-shot diagnostics: log the first decoded frame (and first decode failure) so the
+        # inbound path is visible without logging every ~50 Hz frame.
+        self._logged_frame = False
+        self._logged_undecoded = False
 
     async def start(self) -> None:
         """Start listening for the TV's inbound entertainment stream."""
@@ -74,15 +80,31 @@ class InboundStreamer:
             return None
 
     def _on_frame(self, data: bytes) -> None:
-        """Decode a HueStream frame and submit each colour to the engine."""
+        """Decode a HueStream frame and submit each color to the engine."""
         frame = decode_huestream(data)
         if frame is None:
+            if not self._logged_undecoded:
+                self._logged_undecoded = True
+                LOGGER.warning(
+                    "Inbound frame not decoded (%d bytes, head=%s)", len(data), data[:16].hex()
+                )
             return
-        lights = self._store.config.virtual_lights
+        # Resolve against the lights of the TV that owns the active stream.
+        owner = self._engine.stream_owner
+        lights = tv_lights(self._store, owner)
+        if not self._logged_frame:
+            self._logged_frame = True
+            LOGGER.info(
+                "First inbound HueStream frame: v2=%s colors=%d targets=%s (lights=%d)",
+                frame.is_v2,
+                len(frame.colors),
+                [color.target for color in frame.colors],
+                len(lights),
+            )
         for color in frame.colors:
             light_id = _resolve_light(is_v2=frame.is_v2, target=color.target, lights=lights)
             if light_id is not None:
-                self._engine.submit_color(light_id, color.rgb)
+                self._engine.submit_color(owner, light_id, color.rgb)
 
 
 def _resolve_light(*, is_v2: bool, target: int, lights: list[VirtualLight]) -> str | None:

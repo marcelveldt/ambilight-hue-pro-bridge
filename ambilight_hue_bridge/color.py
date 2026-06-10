@@ -64,7 +64,7 @@ def _clamp01(value: float) -> float:
 
 
 def _gamma(component: float) -> float:
-    """Apply the sRGB gamma curve to a linear colour component."""
+    """Apply the sRGB gamma curve to a linear color component."""
     if component <= 0.0031308:
         return 12.92 * component
     # math.pow keeps the result a float (the `**` operator is typed as Any for float bases).
@@ -89,8 +89,8 @@ def _xy_to_rgb(x: float, y: float) -> tuple[float, float, float]:
 
 
 def _ct_to_rgb(mireds: int) -> tuple[float, float, float]:
-    """Convert a colour temperature in mireds to an approximate sRGB (0-1)."""
-    # Tanner Helland's colour-temperature approximation (boundaries 66 and 19 are his).
+    """Convert a color temperature in mireds to an approximate sRGB (0-1)."""
+    # Tanner Helland's color-temperature approximation (boundaries 66 and 19 are his).
     temp = (1_000_000 / max(1, mireds)) / 100.0
     if temp <= 66:
         red = 1.0

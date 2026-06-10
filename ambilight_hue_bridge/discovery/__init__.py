@@ -1,1 +1,1 @@
-"""LAN discovery: UPnP/SSDP descriptor and responder."""
+"""LAN discovery: the UPnP/SSDP responder + descriptor, mDNS advertisement, and the TLS cert."""

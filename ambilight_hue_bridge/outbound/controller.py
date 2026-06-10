@@ -12,6 +12,7 @@ from ambilight_hue_bridge.const import PAIR_DEVICE_TYPE
 if TYPE_CHECKING:
     from hue_entertainment import EntertainmentArea
 
+    from ambilight_hue_bridge.config.models import VirtualLight
     from ambilight_hue_bridge.config.store import ConfigStore
 
 
@@ -38,6 +39,9 @@ async def pair_and_store(store: ConfigStore, host: str, *, set_active: bool = Tr
     :param set_active: Whether to mark the paired bridge as the active one.
     """
     credentials = await pair_bridge(host)
+    if "username" not in credentials or "clientkey" not in credentials:
+        msg = "the bridge returned an unexpected pairing response"
+        raise OSError(msg)
     bridge = _upsert_bridge(store, host, credentials)
     if set_active:
         store.config.active_real_bridge = bridge.id
@@ -58,6 +62,37 @@ async def list_areas(host: str, app_key: str) -> list[EntertainmentArea]:
         return areas
     finally:
         await api.close()
+
+
+def tv_lights(store: ConfigStore, username: str | None) -> list[VirtualLight]:
+    """
+    Return the virtual lights exposed to a TV.
+
+    Each TV gets only the lights of its assigned entertainment area; an unassigned TV sees
+    no lights until an area is assigned to it in the web UI.
+    """
+    if username:
+        for user in store.config.users:
+            if user.username == username:
+                return user.lights
+    return []
+
+
+def tv_stream_target(
+    store: ConfigStore,
+    username: str | None,
+) -> tuple[str, list[VirtualLight]]:
+    """
+    Return the (entertainment_area, lights) a TV streams to.
+
+    Resolved purely from the TV's own assignment; an unassigned TV returns ("", []) and does
+    not stream.
+    """
+    if username:
+        for user in store.config.users:
+            if user.username == username:
+                return user.entertainment_area, user.lights
+    return "", []
 
 
 def active_bridge(store: ConfigStore) -> RealBridge | None:
