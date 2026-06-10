@@ -129,11 +129,15 @@ class BridgeApp:
         self._ssdp = ssdp
         await ssdp.start()
 
-        # Real Hue bridges also advertise _hue._tcp via mDNS on the TLS port; mirror that for
-        # newer/Android-era Hue clients. Only meaningful when HTTPS actually bound (the service
-        # points clients at the TLS endpoint), so gate it on the live HTTPS port.
-        if config.virtual_bridge.enable_mdns and https_port:
-            mdns = MDNSAdvertiser(host_ip=host_ip, port=https_port, bridge_id=bridge_id(mac))
+        # Real Hue bridges advertise _hue._tcp via mDNS; mirror that for newer/Android-era Hue
+        # clients (e.g. the OLED807, which ONLY discovers via mDNS). Advertise the TLS port when
+        # HTTPS is up (real-bridge-faithful, used by CLIP-v2 clients), else the HTTP port. The
+        # Ambilight TVs ignore the SRV port and reach the v1 API on :80 either way, so discovery
+        # no longer depends on HTTPS being enabled.
+        if config.virtual_bridge.enable_mdns:
+            mdns = MDNSAdvertiser(
+                host_ip=host_ip, port=https_port or http_port, bridge_id=bridge_id(mac)
+            )
             self._mdns = mdns
             await mdns.start()
 

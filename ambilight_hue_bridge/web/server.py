@@ -67,6 +67,7 @@ class WebServer:
                 web.put("/cfg/settings", self._handle_put_settings),
                 web.get("/cfg/tvs", self._handle_tvs),
                 web.put("/cfg/tvs/{username}", self._handle_assign_tv),
+                web.delete("/cfg/tvs/{username}", self._handle_delete_tv),
                 web.get("/cfg/areas", self._handle_areas_list),
                 web.get("/cfg/discover", self._handle_discover),
                 web.get("/cfg/bridges", self._handle_bridges),
@@ -137,20 +138,43 @@ class WebServer:
         if user is None:
             return web.json_response({"error": "Unknown TV."}, status=404)
         body = await _read_json(request)
+        # Only rebuild the lights when the area/split actually change - a smoothing-only edit
+        # must not re-fetch the area and renumber lights the TV has already been assigned.
+        rebuild = False
         if "entertainment_area" in body:
             user.entertainment_area = str(body["entertainment_area"])
+            rebuild = True
         if "split_gradients" in body:
             user.split_gradients = bool(body["split_gradients"])
-        if user.entertainment_area:
-            area = await self._area_by_id(user.entertainment_area)
-            user.lights = (
-                _mirror_from_area(area, split_gradients=user.split_gradients) if area else []
+            rebuild = True
+        if "stream_smoothing" in body:
+            value = body["stream_smoothing"]
+            user.stream_smoothing = (
+                None if value is None else max(0.0, min(MAX_STREAM_SMOOTHING, float(value)))
             )
-        else:
-            user.lights = []
+        if rebuild:
+            if user.entertainment_area:
+                area = await self._area_by_id(user.entertainment_area)
+                user.lights = (
+                    _mirror_from_area(area, split_gradients=user.split_gradients) if area else []
+                )
+            else:
+                user.lights = []
         self._store.save()
         owner = self._engine.stream_owner if self._engine is not None else None
         return web.json_response(self._tv_dict(user, owner))
+
+    async def _handle_delete_tv(self, request: web.Request) -> web.StreamResponse:
+        """Remove a paired TV (stopping its stream if it is the one currently streaming)."""
+        username = request.match_info["username"]
+        config = self._store.config
+        if not any(user.username == username for user in config.users):
+            return web.json_response({"error": "Unknown TV."}, status=404)
+        config.users = [user for user in config.users if user.username != username]
+        if self._engine is not None and self._engine.stream_owner == username:
+            await self._engine.stop_stream()
+        self._store.save()
+        return web.json_response({"deleted": username})
 
     async def _handle_areas_list(self, _request: web.Request) -> web.StreamResponse:
         """List the active bridge's entertainment areas (for per-TV assignment)."""
@@ -224,6 +248,12 @@ class WebServer:
             "streaming": user.username == owner,
             "entertainment_area": user.entertainment_area,
             "split_gradients": user.split_gradients,
+            "stream_smoothing": user.stream_smoothing,
+            "effective_smoothing": (
+                user.stream_smoothing
+                if user.stream_smoothing is not None
+                else self._store.config.virtual_bridge.stream_smoothing
+            ),
             "lights": [light.name for light in user.lights],
         }
 
@@ -312,8 +342,12 @@ def _mirror_from_area(area: Any, *, split_gradients: bool = True) -> list[Virtua
     for index, channel in enumerate(area.channels):
         base = channel.name or f"Zone {index + 1}"
         if name_counts.get(channel.name, 0) > 1:
-            seen[base] = seen.get(base, 0) + 1
-            name = f"{base} {seen[base]}"
+            # Same-named gradient zones: disambiguate by on-screen position so the user can tell
+            # them apart (e.g. "Strip (left)") instead of an opaque "Strip 1".
+            label = _zone_label(channel.position)
+            seen[label] = seen.get(label, 0) + 1
+            suffix = label if seen[label] == 1 else f"{label} {seen[label]}"
+            name = f"{base} ({suffix})"
         else:
             name = base
         lights.append(
@@ -325,3 +359,17 @@ def _mirror_from_area(area: Any, *, split_gradients: bool = True) -> list[Virtua
             ),
         )
     return lights
+
+
+def _zone_label(position: Any) -> str:
+    """Describe a channel's horizontal screen position from its x coordinate (left..right)."""
+    x = position[0]
+    if x < -0.6:
+        return "far left"
+    if x < -0.2:
+        return "left"
+    if x > 0.6:
+        return "far right"
+    if x > 0.2:
+        return "right"
+    return "center"

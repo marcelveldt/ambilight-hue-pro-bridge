@@ -8,6 +8,7 @@ import logging
 import signal
 from contextlib import suppress
 from importlib.metadata import PackageNotFoundError, version
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from .app import BridgeApp
@@ -18,6 +19,7 @@ from .const import (
     DEFAULT_HTTP_PORT,
     DEFAULT_HTTPS_PORT,
     DISPLAY_NAME,
+    LOG_FILENAME,
     PACKAGE_NAME,
 )
 from .outbound.controller import active_bridge, list_areas, pair_and_store
@@ -70,6 +72,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging verbosity.",
     )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a rotating log file written in addition to the console "
+            f"(default: <data-dir>/{LOG_FILENAME})."
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {get_version()}")
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("serve", help="Run the bridge service (the default).")
@@ -79,13 +90,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _configure_logging(level: str, log_path: Path) -> None:
+    """
+    Send logs to the console and a rotating file.
+
+    :param level: Logging level name (e.g. ``INFO``).
+    :param log_path: Path to the rotating log file (its directory is created if needed).
+    """
+    fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(name)s: %(message)s")
+    root = logging.getLogger()
+    root.setLevel(level)
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    root.addHandler(console)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = RotatingFileHandler(log_path, maxBytes=5_000_000, backupCount=3)
+    file_handler.setFormatter(fmt)
+    root.addHandler(file_handler)
+
+
 def main(argv: list[str] | None = None) -> None:
     """Run the console-script entry point."""
     args = parse_args(argv)
-    logging.basicConfig(
-        level=args.log_level,
-        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-    )
+    log_path = args.log_file or (args.data_dir / LOG_FILENAME)
+    _configure_logging(args.log_level, log_path)
+    LOGGER.info("Logging to %s", log_path)
     command = args.command or "serve"
     if command == "serve":
         LOGGER.info("%s %s starting", DISPLAY_NAME, get_version())

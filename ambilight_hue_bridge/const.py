@@ -10,6 +10,8 @@ DISPLAY_NAME: Final = "Ambilight+Hue Pro Bridge"
 # Directory for persistent configuration and state.
 DEFAULT_DATA_DIR: Final = "data"
 CONFIG_FILENAME: Final = "config.yaml"
+# Rotating log file written under the data dir (in addition to the console) by default.
+LOG_FILENAME: Final = "bridge.log"
 
 # Single HTTP port serving the TV-facing Hue API + descriptor AND the web UI. This is a
 # command-line option only (never persisted). 8080 is a convenient default; older

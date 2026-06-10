@@ -54,6 +54,7 @@ class _FakeEngine:
         self.started: list[str] = []
         self.stopped = 0
         self.colors: list[tuple[str, str]] = []
+        self.identified: list[tuple[str, str, bool]] = []
 
     def start_stream(self, owner: str) -> None:
         self.stream_owner = owner
@@ -67,6 +68,12 @@ class _FakeEngine:
 
     def submit_color(self, owner: str, light_id: str, _rgb: tuple[int, int, int]) -> None:
         self.colors.append((owner, light_id))
+
+    def identify(self, owner: str, light_id: str, *, sustained: bool = False) -> None:
+        self.identified.append((owner, light_id, sustained))
+
+    def stop_identify(self, light_id: str) -> None:
+        self.identified.append(("", light_id, False))
 
 
 def _build_emulator_with_engine(tmp_path: Path) -> tuple[web.Application, ConfigStore, _FakeEngine]:
@@ -242,6 +249,21 @@ async def test_malformed_light_state_does_not_500(aiohttp_client, emulator_setup
     assert len(got["state"]["xy"]) == 2
 
 
+async def test_create_group_accepts_trailing_slash(aiohttp_client, emulator_setup) -> None:
+    """Newer TVs POST to /groups/ with a trailing slash; it must create a group, not 404."""
+    app, store = emulator_setup
+    client = await aiohttp_client(app)
+    pair = await (await client.post("/api", json={"devicetype": "unit"})).json()
+    user = pair[0]["success"]["username"]
+    store.config.users[-1].lights = _two_lights()
+    resp = await client.post(
+        f"/api/{user}/groups/",
+        json={"lights": ["1", "2"], "type": "Entertainment", "class": "TV"},
+    )
+    assert resp.status == 200
+    assert "id" in (await resp.json())[0]["success"]
+
+
 async def test_single_stream_guard_denies_a_second_tv(aiohttp_client, tmp_path) -> None:
     """While one TV streams, a second is denied (307); the owner may re-activate and stop."""
     app, store, engine = _build_emulator_with_engine(tmp_path)
@@ -272,6 +294,15 @@ async def test_non_dict_stream_body_does_not_500(aiohttp_client, tmp_path) -> No
     client = await aiohttp_client(app)
     resp = await client.put("/api/u1/groups/200", json={"stream": "on"})
     assert resp.status == 200
+
+
+async def test_light_state_alert_triggers_identify(aiohttp_client, tmp_path) -> None:
+    """An alert=lselect on a light asks the engine to identify (blink) it."""
+    app, store, engine = _build_emulator_with_engine(tmp_path)
+    store.config.users = [_assigned_user("u1")]
+    client = await aiohttp_client(app)
+    await client.put("/api/u1/lights/1/state", json={"alert": "lselect"})
+    assert engine.identified == [("u1", "1", True)]
 
 
 async def test_group_action_fans_out_to_engine(aiohttp_client, tmp_path) -> None:

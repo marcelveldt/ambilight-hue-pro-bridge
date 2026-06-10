@@ -76,7 +76,9 @@ class SSDPServer(asyncio.DatagramProtocol):
             LOGGER.debug("SSDP ignored non-discover datagram from %s:%d", addr[0], addr[1])
             return
         search_target = _header_value(message, "ST") or "?"
-        LOGGER.info(
+        # Demoted to DEBUG: every UPnP device on the LAN M-SEARCHes constantly, so this is noise
+        # at INFO. The startup "listening/joined" lines stay at INFO.
+        LOGGER.debug(
             "SSDP M-SEARCH from %s:%d (ST=%s) - responding", addr[0], addr[1], search_target
         )
         if self._transport is None:

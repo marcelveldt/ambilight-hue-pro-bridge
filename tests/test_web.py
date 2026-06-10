@@ -8,7 +8,7 @@ import pytest
 from aiohttp import web
 from hue_entertainment import DiscoveredBridge, EntertainmentArea, LightChannel
 
-from ambilight_hue_bridge.config.models import PairedUser, RealBridge
+from ambilight_hue_bridge.config.models import PairedUser, RealBridge, VirtualLight
 from ambilight_hue_bridge.config.store import ConfigStore
 from ambilight_hue_bridge.web.server import WebServer, _mirror_from_area
 
@@ -93,6 +93,68 @@ async def test_areas_list(aiohttp_client, web_setup, monkeypatch) -> None:
     areas = await (await client.get("/cfg/areas")).json()
     assert areas[0]["id"] == "area-1"
     assert areas[0]["channels"] == 2
+
+
+async def test_delete_tv(aiohttp_client, web_setup) -> None:
+    """A paired TV can be removed; deleting an unknown one returns 404."""
+    app, store = web_setup
+    store.config.users = [
+        PairedUser(username="u1", clientkey="k", devicetype="TV", created="2026-06-11"),
+    ]
+    client = await aiohttp_client(app)
+    assert (await client.delete("/cfg/tvs/u1")).status == 200
+    assert store.config.users == []
+    assert (await client.delete("/cfg/tvs/u1")).status == 404
+
+
+async def test_assign_smoothing_override_does_not_rebuild_lights(aiohttp_client, web_setup) -> None:
+    """A smoothing-only PUT stores the per-TV override and leaves the TV's lights untouched."""
+    app, store = web_setup
+    store.config.users = [
+        PairedUser(
+            username="u1",
+            clientkey="k",
+            devicetype="TV",
+            created="2026-06-11",
+            entertainment_area="area-1",
+            lights=[VirtualLight(id="1", name="Left"), VirtualLight(id="2", name="Right")],
+        ),
+    ]
+    client = await aiohttp_client(app)
+    tv = await (await client.put("/cfg/tvs/u1", json={"stream_smoothing": 0.0})).json()
+    assert tv["stream_smoothing"] == 0.0
+    assert tv["effective_smoothing"] == 0.0
+    # Not rebuilt (no list_areas call needed; the existing light names are preserved).
+    assert tv["lights"] == ["Left", "Right"]
+    assert store.config.users[0].stream_smoothing == 0.0
+
+
+async def test_tv_effective_smoothing_falls_back_to_global(aiohttp_client, web_setup) -> None:
+    """A TV with no override reports the global default as its effective smoothing."""
+    app, store = web_setup
+    store.config.virtual_bridge.stream_smoothing = 0.7
+    store.config.users = [
+        PairedUser(username="u1", clientkey="k", devicetype="TV", created="2026-06-11"),
+    ]
+    client = await aiohttp_client(app)
+    tvs = await (await client.get("/cfg/tvs")).json()
+    assert tvs[0]["stream_smoothing"] is None
+    assert tvs[0]["effective_smoothing"] == 0.7
+
+
+def test_mirror_labels_gradient_zones_by_position() -> None:
+    """Same-named gradient zones are disambiguated by their on-screen position."""
+    area = EntertainmentArea(
+        id="a",
+        name="A",
+        channels=[
+            LightChannel(channel_id=0, service_id="g", name="Strip", position=(-0.9, 0.0, 0.0)),
+            LightChannel(channel_id=1, service_id="g", name="Strip", position=(0.0, 0.0, 0.0)),
+            LightChannel(channel_id=2, service_id="g", name="Strip", position=(0.9, 0.0, 0.0)),
+        ],
+    )
+    names = [light.name for light in _mirror_from_area(area, split_gradients=True)]
+    assert names == ["Strip (far left)", "Strip (center)", "Strip (far right)"]
 
 
 def test_mirror_merges_gradient_when_not_split() -> None:

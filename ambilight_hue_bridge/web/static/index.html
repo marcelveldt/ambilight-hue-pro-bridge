@@ -64,10 +64,11 @@
   </p>
   <div id="tvs"><p class="muted">No TVs paired yet — add this bridge from the TV's Ambilight+Hue menu.</p></div>
 
-  <h2>③ Smoothness</h2>
+  <h2>③ Default smoothness</h2>
   <p class="muted">
-    Eases the TV's abrupt Ambilight colours into fades. Higher = smoother but more lag;
-    0 = off (snappy but steppy). Smoothing applies live; the rate applies on restart.
+    Eases a TV's abrupt Ambilight colours into fades. Higher = smoother but more lag;
+    0 = off (snappy but steppy). This is the <em>default</em> — each TV can override it above
+    (fast DTLS-streaming TVs want ~0; ~1 Hz TVs want more). Applies live; the rate needs a restart.
   </p>
   <div class="card">
     <div class="row">
@@ -227,32 +228,55 @@ function renderTv(tv, areas) {
   const lights = (tv.lights && tv.lights.length)
     ? tv.lights.join(", ")
     : "— none yet; pick an area above to give this TV its lights";
+  const smooth = Number(tv.effective_smoothing ?? 0.5);
+  const smoothTag = tv.stream_smoothing != null ? "" : " (default)";
   card.innerHTML =
     `<div class="row"><strong>${tv.devicetype || "TV"}</strong>`
     + `<span class="muted">${tv.created ? "paired " + tv.created : ""}</span>`
-    + `<span class="spacer"></span>${badge}</div>`
+    + `<span class="spacer"></span>${badge}<button data-del>Remove</button></div>`
     + `<div class="row" style="margin-top:.6rem"><span class="muted">Controls area</span>`
     + `<select data-area>${opts}</select>`
     + `<label class="badge"><input type="checkbox" data-split${tv.split_gradients ? " checked" : ""}/>`
     + ` split gradient zones</label></div>`
+    + `<div class="row" style="margin-top:.3rem"><span class="muted">Smoothness</span>`
+    + `<input data-smooth type="range" min="0" max="0.95" step="0.05" value="${smooth}" style="flex:1"/>`
+    + `<span class="badge" data-smooth-val>${smooth.toFixed(2)}${smoothTag}</span></div>`
     + `<div class="row" style="margin-top:.3rem"><span class="muted">Lights: ${lights}</span></div>`
     + `<span class="error" data-err></span>`;
   const sel = card.querySelector("[data-area]");
   const split = card.querySelector("[data-split]");
+  const smoothEl = card.querySelector("[data-smooth]");
+  const smoothVal = card.querySelector("[data-smooth-val]");
   const err = card.querySelector("[data-err]");
+  const put = (body) => api(`/cfg/tvs/${encodeURIComponent(tv.username)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
   const save = async () => {
     err.textContent = "";
     try {
-      await api(`/cfg/tvs/${encodeURIComponent(tv.username)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ entertainment_area: sel.value, split_gradients: split.checked }),
-      });
+      await put({ entertainment_area: sel.value, split_gradients: split.checked });
       await loadTvs();
     } catch (e) { err.textContent = String(e.message || e); }
   };
   sel.onchange = save;
   split.onchange = save;
+  let smoothTimer = null;
+  smoothEl.oninput = () => {
+    const v = Number(smoothEl.value);
+    smoothVal.textContent = v.toFixed(2);
+    // Debounce; PUT smoothing alone so the TV's lights aren't rebuilt.
+    clearTimeout(smoothTimer);
+    smoothTimer = setTimeout(() => put({ stream_smoothing: v }).catch(() => {}), 150);
+  };
+  card.querySelector("[data-del]").onclick = async () => {
+    err.textContent = "";
+    try {
+      await api(`/cfg/tvs/${encodeURIComponent(tv.username)}`, { method: "DELETE" });
+      await loadTvs();
+    } catch (e) { err.textContent = String(e.message || e); }
+  };
   return card;
 }
 

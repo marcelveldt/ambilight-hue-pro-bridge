@@ -36,6 +36,9 @@ class PairedUser:
     entertainment_area: str = ""
     split_gradients: bool = True
     lights: list[VirtualLight] = field(default_factory=list)
+    # Per-TV smoothing override (None => use the global default). DTLS-streaming TVs send a fast,
+    # already-smooth stream and want ~0; ~1 Hz REST TVs want easing to fill the gaps.
+    stream_smoothing: float | None = None
 
 
 @dataclass

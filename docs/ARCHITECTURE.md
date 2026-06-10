@@ -5,11 +5,12 @@ the module/data design. Distilled from research into diyHue, Home Assistant
 `emulated_hue` / `hass-emulated-hue`, Music Assistant's `hue_entertainment`, and
 community packet/log analysis. Source citations are at the bottom.
 
-> Status: **built and working** (milestones M1–M5 — see §9): discovery (SSDP + mDNS),
-> pairing, the v1 REST surface, the outbound entertainment engine, the web UI, and the
-> inbound DTLS path all ship. What remains is verifying the exact legacy REST payload a
-> real older TV sends (§1, §8 risk #1) and packaging (Docker / HA-OS add-on). This doc also
-> records the protocol research the build is based on.
+> Status: **built and working.** Discovery (SSDP + mDNS), pairing, the v1 REST surface, the
+> outbound + inbound Entertainment streaming, and the web UI all ship and have been verified
+> live against both an older (2018, TPM171E) and a newer (2022, Android OLED807) Ambilight TV
+> streaming to a Hue Pro. The current implementation is summarised in §9. Packaging (Docker /
+> HA-OS add-on) is the main thing still outstanding. This doc also records the protocol
+> research the build is based on.
 
 ---
 
@@ -323,28 +324,30 @@ State machine: `IDLE → (first inbound write) → STREAMING → (inactivity tim
 
 ---
 
-## 9. Incremental MVP plan (riskiest assumption first)
+## 9. Current implementation
 
-- ⬜ **M0 — Capture ground truth** (de-risk #1): point the real older TV at the request log /
-  `tcpdump`. Record discovery sequence, pairing body, the exact light/group write endpoints,
-  color encoding, cadence. *Still open — M1's verbatim request logging is the capture tool.*
-- ✅ **M1 — Discoverable, pairable, enumerable virtual bridge** (de-risk #2/#3): `identity.py`,
-  SSDP (+NOTIFY), `/description.xml`, mDNS, and the v1 REST surface (pairing with
-  `generateclientkey`, `/config`, `/capabilities` with `streaming`, `/lights`, `/groups`)
-  with strict int typing. The real TV discovers, pairs, and is configured; every request is
-  logged verbatim (doubling as M0's capture).
-- ✅ **M2 — Outbound entertainment to a real bridge** (de-risk #4): via the shared
-  `hue-entertainment` package — auth, fetch area + channels, activate stream, push frames to a
-  real **V2 / Pro** bridge with sub-100 ms added latency.
-- ✅ **M3 — Join the halves:** REST/DTLS in → ingest buffer → smoothing → fixed-rate ticker →
-  entertainment client, per-TV light → channel mapping. End-to-end working.
-- ✅ **M4 — Mapping engine + web UI:** per-TV area assignment with optional gradient-zone
-  split; lazy outbound start/stop + idle teardown; live smoothing/rate controls.
-- ✅ **M5 — Inbound DTLS server** for 2019+ Android TVs, behind `enable_inbound_dtls`. Same
-  ingest buffer + ticker; only the frame source changes.
-- ⬜ **M6 — Packaging:** multi-arch Docker (host networking for SSDP/mDNS + UDP 2100) and a
-  HA-OS add-on (S6, `config.yaml`/`bashio`, ingress for the web UI, `host_network: true`,
-  privileged only if inbound DTLS / tcpdump needed).
+What's built and verified live against both Ambilight generations:
+
+- **Discovery** — `identity.py` + a byte-faithful SSDP/UPnP responder (`/description.xml`,
+  periodic NOTIFY) and an mDNS `_hue._tcp` advertisement, plus an optional self-signed-cert
+  HTTPS listener. Older TVs find us over SSDP; the 2022 Android set finds us over mDNS.
+- **Virtual bridge** — the v1 REST surface (pairing with `generateclientkey`, `/config`,
+  `/capabilities` with `streaming`, `/lights`, `/groups`, strict int typing) plus a local
+  N-UPnP endpoint for other LAN clients.
+- **Streaming** — inbound on both paths (the ~1 Hz v1 REST writes *and* the newer TVs' DTLS
+  HueStream on UDP 2100) into a latest-wins ingest buffer; a fixed-rate ticker applies per-TV
+  smoothing and forwards on demand to a **V2 / Pro** bridge via the shared `hue-entertainment`
+  client, with idle teardown.
+- **Engine** — per-TV light↔channel mapping, gradient-zone split, per-TV smoothing, light
+  identify (blink over the stream), and a single-active-stream guard.
+- **Web UI** — bridge pairing, per-TV area assignment + smoothing, and TV removal.
+
+The exact older-TV write shape that §1/§8 flag as uncaptured is now largely confirmed from live
+request logs of both TV generations (see the memory/protocol notes).
+
+**Still outstanding:** packaging — a multi-arch Docker image (host networking for SSDP/mDNS +
+UDP 2100) and a HA-OS add-on (S6, `config.yaml`/`bashio`, ingress for the web UI,
+`host_network: true`) — and continued verification across more TV models.
 
 ---
 

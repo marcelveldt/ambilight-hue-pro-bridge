@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from ambilight_hue_bridge.config.models import PairedUser, RealBridge, VirtualLight
@@ -186,6 +188,49 @@ async def test_engine_does_not_stream_for_unassigned_tv(tmp_path: Path) -> None:
     assert not await _wait_until(lambda: engine.is_streaming, max_wait=0.3)
 
 
+def test_apply_identify_blinks_then_expires(tmp_path: Path) -> None:
+    """An identified light is forced full-white/off, and the entry expires after its window."""
+    store = _configured_store(tmp_path)
+    engine = Engine(store)
+    engine._identify["1"] = time.monotonic() + 5.0
+    engine._apply_identify()
+    assert engine._smoothed_buffer.get_color("1") in {(65535, 65535, 65535), (0, 0, 0)}
+    assert "1" in engine._identify
+    engine._identify["1"] = time.monotonic() - 1.0  # already expired
+    engine._apply_identify()
+    assert "1" not in engine._identify
+
+
+async def test_identify_opens_a_stream(tmp_path: Path, monkeypatch) -> None:
+    """identify() adopts the owner and opens the outbound stream so the blink is visible."""
+    created: list[_FakeSession] = []
+
+    def factory(*args: object, **kwargs: object) -> _FakeSession:
+        session = _FakeSession(*args, **kwargs)  # type: ignore[arg-type]
+        created.append(session)
+        return session
+
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    engine = Engine(_configured_store(tmp_path))
+    engine.identify("tv1", "1")
+    assert "1" in engine._identify
+    assert engine.stream_owner == "tv1"
+    assert await _wait_until(lambda: engine.is_streaming)
+    await engine.stop()
+
+
+def test_resolve_smoothing_prefers_per_tv_override(tmp_path: Path) -> None:
+    """Smoothing resolves to the owning TV's override when set, else the global default."""
+    store = _configured_store(tmp_path)
+    store.config.virtual_bridge.stream_smoothing = 0.5
+    engine = Engine(store)
+    assert engine._resolve_smoothing() == 0.5  # no owner -> global default
+    engine._stream_owner = "tv1"
+    assert engine._resolve_smoothing() == 0.5  # tv1 has no override yet
+    store.config.users[0].stream_smoothing = 0.0
+    assert engine._resolve_smoothing() == 0.0  # per-TV override wins
+
+
 def test_submit_color_adopts_owner_only_once(tmp_path: Path) -> None:
     """submit_color adopts the first real owner and never lets a later TV steal it."""
     store = ConfigStore(tmp_path / "config.yaml")
@@ -208,6 +253,39 @@ def test_submit_color_adopts_owner_only_once(tmp_path: Path) -> None:
     assert engine.stream_owner == "tv1"
     engine.submit_color("tv2", "1", (1, 2, 3))
     assert engine.stream_owner == "tv1"
+
+
+async def test_stop_during_startup_discards_the_stream(tmp_path: Path, monkeypatch) -> None:
+    """A stop while the (slow, uncancellable) connect is in flight discards the session."""
+    gate = asyncio.Event()
+    closed: list[bool] = []
+
+    class _SlowSession(_FakeSession):
+        """A session whose connect blocks and swallows cancellation (mimics the real DTLS)."""
+
+        async def start(self, area_id: str) -> None:
+            assert area_id
+            # Swallow cancellation to mimic the real lib's non-cancellable DTLS connect.
+            with suppress(asyncio.CancelledError):
+                await gate.wait()
+            self.connected = True
+
+        async def aclose(self) -> None:
+            await super().aclose()
+            closed.append(True)
+
+    def factory(*args: object, **kwargs: object) -> _SlowSession:
+        return _SlowSession(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    engine = Engine(_configured_store(tmp_path))
+    engine.start_stream("tv1")
+    await asyncio.sleep(0.02)  # let _start_stream block in session.start
+    await engine.stop()  # bumps the generation, then awaits the in-flight connect
+    gate.set()
+    await asyncio.sleep(0.02)
+    assert not engine.is_streaming
+    assert closed  # the racing session was closed, not left as a zombie
 
 
 async def test_start_stream_sets_owner_then_clears_on_stop(tmp_path: Path, monkeypatch) -> None:

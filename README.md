@@ -4,11 +4,10 @@ Bridge older Philips **Ambilight+Hue** TVs to modern Philips Hue bridges — inc
 the new **Hue Pro bridge** — over the low-latency **Entertainment API**, with support
 for **multi-zone / gradient lights**.
 
-> [!WARNING]
-> **Status: early development.** The virtual bridge (SSDP discovery, pairing, v1 REST API),
-> the web configuration UI, the outbound Entertainment streaming engine, and the inbound
-> DTLS path for newer TVs all work; packaging is still to come, and the TV-side wire
-> protocol still needs verification against a real TV. See [Roadmap](#roadmap).
+> **Status:** working and in real use. Discovery (SSDP + mDNS), pairing, the v1 REST API, the
+> web UI, per-TV configuration, and the outbound + inbound Entertainment streaming are all
+> implemented and verified live against both an older (2018) and a newer (2022, Android)
+> Ambilight TV. Not yet packaged as a Docker image / Home Assistant add-on (see [Status](#status)).
 
 ## Why this exists
 
@@ -56,13 +55,11 @@ The app sits on your LAN between the TV and your real Hue bridge:
 
 - 🪟 Web interface for configuration
 - 🧩 KISS, robust, low-resource always-on background service (cheap when idle)
-- 🎬 Multiple entertainment areas
-- 🌈 Map a gradient / multi-zone light into multiple virtual lights
-- 🎛️ Choose which lights to expose to the virtual bridge
-- 📡 Exposes a virtual Hue bridge for the TV to connect to
+- 📺 Per-TV setup — assign each TV an entertainment area, with its own smoothing
+- 🌈 Map a gradient / multi-zone light into multiple addressable virtual lights
+- 📡 Discovered by both older (SSDP/UPnP) and newer (mDNS) Ambilight TVs
 - 🔌 Works with both the square Hue V2 bridge and the new Hue Pro bridge
-- ⚡ Entertainment API streaming with as little latency as possible
-- 🐳 Runs as a Docker container and as a Home Assistant OS add-on
+- ⚡ Low-latency streaming — inbound DTLS from newer TVs, ~1 Hz REST from older ones, forwarded over the Entertainment API
 
 ## Architecture
 
@@ -87,9 +84,9 @@ The service is built from a few focused, decoupled components:
 
 ## Installation
 
-Packaging as a multi-arch Docker image and a Home Assistant OS add-on is planned — see
-[Roadmap](#roadmap). Because the service must answer SSDP multicast and present a
-virtual bridge on the LAN, it is expected to run with **host networking**.
+Run it from source (see [Development](#development) below). Packaging as a multi-arch Docker
+image and a Home Assistant OS add-on is planned. Because the service answers SSDP/mDNS multicast
+and presents a virtual bridge on the LAN, it needs to run with **host networking**.
 
 ## Development
 
@@ -112,6 +109,9 @@ sudo ambilight-hue-bridge --http-port 80 --https-port 443 --log-level DEBUG
 # your Hue bridge (press the link button first). A freshly paired TV has no lights;
 # assign it an entertainment area in the UI to expose that area's lights. A
 # `pair` / `areas` CLI is also available for headless setup.
+#
+# logs go to the console and a rotating file at <data-dir>/bridge.log (override with
+# --log-file); HTTPS is optional (--https-port 0) — discovery still works over mDNS + HTTP.
 
 # run the checks
 pre-commit run --all-files
@@ -123,18 +123,26 @@ project follows the conventions of [aiohue](https://github.com/home-assistant-li
 [aiosonos](https://github.com/music-assistant/aiosonos) and
 [Music Assistant](https://github.com/music-assistant/server).
 
-## Roadmap
+## Status
 
-- [x] Hue Entertainment streaming client — the shared [music-assistant/hue-entertainment](https://github.com/music-assistant/hue-entertainment) library
-- [x] Virtual bridge: SSDP/UPnP discovery + legacy v1 REST emulation + pairing
-- [x] Outbound engine: v1 state → RGB, ingest buffer, channel mapping, on-demand streaming
-- [ ] Verify the TV ↔ bridge wire protocol against a real TV (capture via the request log)
-- [x] Web configuration UI — bridge discovery + pairing + per-TV area assignment
-- [x] Inbound DTLS server (UDP 2100) for newer Android Ambilight TVs (pure-Python DTLS-PSK)
-- [x] mDNS `_hue._tcp` advertisement + local N-UPnP endpoint (additive LAN discovery)
-- [x] Web UI: per-TV entertainment-area assignment (optional gradient-zone split)
-- [ ] Docker image (multi-arch)
-- [ ] Home Assistant OS add-on
+Implemented and working end-to-end:
+
+- **Discovery** — SSDP/UPnP responder + descriptor and an mDNS `_hue._tcp` advertisement, so both
+  older (SSDP) and newer Android (mDNS) Ambilight TVs find the bridge. Optional HTTPS listener.
+- **Virtual bridge** — the legacy Hue v1 REST API, pairing (with `generateclientkey`), and a local
+  N-UPnP endpoint for other LAN clients.
+- **Streaming** — inbound DTLS server (UDP 2100) for newer TVs and the ~1 Hz REST path for older
+  ones, forwarded on demand to a V2 or Pro bridge over the Entertainment API via the shared
+  [music-assistant/hue-entertainment](https://github.com/music-assistant/hue-entertainment) client.
+- **Engine** — per-TV light/area mapping, gradient-zone split, per-TV temporal smoothing, light
+  identify (blink), and idle teardown.
+- **Web UI** — bridge pairing, per-TV area assignment + smoothing, and TV removal.
+
+Verified live against an older (2018) and a newer (2022, Android) Ambilight TV, streaming to a
+Hue Pro bridge.
+
+Planned: a multi-arch Docker image and a Home Assistant OS add-on, plus continued verification of
+the TV wire protocol across more models.
 
 ## Credits
 

@@ -194,6 +194,9 @@ class HueV1Emulator:
                 web.put("/api/{user}/lights/{light_id}/state", self._handle_light_state),
                 web.get("/api/{user}/groups", self._handle_groups),
                 web.post("/api/{user}/groups", self._handle_create_group),
+                # Newer TVs (e.g. OLED807) POST to the collection with a trailing slash; without
+                # this the create 404s and the TV falls back to an unusable group id of "null".
+                web.post("/api/{user}/groups/", self._handle_create_group),
                 web.get("/api/{user}/groups/{group_id}", self._handle_group),
                 web.put("/api/{user}/groups/{group_id}", self._handle_group_put),
                 web.put("/api/{user}/groups/{group_id}/action", self._handle_group_action),
@@ -319,6 +322,14 @@ class HueV1Emulator:
             {"success": {f"/lights/{light_id}/state/{key}": value}} for key, value in body.items()
         ]
         _coerce_light_state(state, body)
+        # The TV sends alert=select/lselect to say "blink this light" while assigning zones; flash
+        # it over the stream so the user can locate it. alert=none cancels.
+        alert = body.get("alert")
+        if self._engine is not None:
+            if alert in ("select", "lselect"):
+                self._engine.identify(user, light_id, sustained=alert == "lselect")
+            elif alert == "none":
+                self._engine.stop_identify(light_id)
         self._submit_color(user, light_id)
         return _json(result)
 
