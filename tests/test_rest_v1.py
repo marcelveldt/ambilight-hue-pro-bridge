@@ -33,6 +33,7 @@ def emulator_app(tmp_path: Path) -> web.Application:
         pairing=PairingManager(store),
         host_ip="1.2.3.4",
         mac="aabbccddeeff",
+        http_port=80,
     )
     return emulator.create_app()
 

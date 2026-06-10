@@ -69,11 +69,14 @@ class BridgeApp:
         """Load config and start the HTTP API and SSDP responder."""
         self._store.load()
         config = self._store.config
-        if self._http_port_override is not None:
-            config.virtual_bridge.http_port = self._http_port_override
+        # Runtime-only override; never written back to the persisted config.
+        http_port = (
+            self._http_port_override
+            if self._http_port_override is not None
+            else config.virtual_bridge.http_port
+        )
         mac = config.virtual_bridge.mac or get_host_mac()
         host_ip = get_host_ip()
-        port = config.virtual_bridge.http_port
 
         engine = Engine(self._store)
         self._engine = engine
@@ -83,17 +86,18 @@ class BridgeApp:
             pairing=pairing,
             host_ip=host_ip,
             mac=mac,
+            http_port=http_port,
             engine=engine,
         )
         runner = web.AppRunner(emulator.create_app(), access_log=None)
         self._runner = runner
         await runner.setup()
-        await web.TCPSite(runner, host="0.0.0.0", port=port).start()
-        LOGGER.info("Virtual Hue bridge HTTP API listening on %s:%d", host_ip, port)
+        await web.TCPSite(runner, host="0.0.0.0", port=http_port).start()
+        LOGGER.info("Virtual Hue bridge HTTP API listening on %s:%d", host_ip, http_port)
 
         ssdp = SSDPServer(
             host_ip=host_ip,
-            http_port=port,
+            http_port=http_port,
             bridge_id=bridge_id(mac),
             udn=bridge_udn(mac),
         )

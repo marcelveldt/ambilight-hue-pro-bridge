@@ -80,6 +80,7 @@ class HueV1Emulator:
         pairing: PairingManager,
         host_ip: str,
         mac: str,
+        http_port: int,
         engine: Engine | None = None,
     ) -> None:
         """
@@ -89,12 +90,14 @@ class HueV1Emulator:
         :param pairing: Pairing manager for username/clientkey handling.
         :param host_ip: LAN IP address advertised in the UPnP descriptor.
         :param mac: Resolved host MAC used to derive the bridge id and UDN.
+        :param http_port: TCP port the API/descriptor are served on (for the descriptor URL).
         :param engine: Optional engine that streams color updates to the real bridge.
         """
         self._store = store
         self._pairing = pairing
         self._host_ip = host_ip
         self._mac = mac
+        self._http_port = http_port
         self._engine = engine
         self._states: dict[str, dict[str, Any]] = {
             light.id: default_light_state() for light in store.config.virtual_lights
@@ -137,7 +140,7 @@ class HueV1Emulator:
             name=self._store.config.virtual_bridge.name,
             mac=self._mac,
             host=self._host_ip,
-            port=self._store.config.virtual_bridge.http_port,
+            port=self._http_port,
         )
         return web.Response(text=xml, content_type="application/xml")
 
