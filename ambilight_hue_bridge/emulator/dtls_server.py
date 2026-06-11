@@ -61,7 +61,7 @@ class HueDtlsServer:
         self,
         *,
         psk_provider: Callable[[str], bytes | None],
-        on_frame: Callable[[bytes], None],
+        on_frame: Callable[[str, bytes], None],
         loop: asyncio.AbstractEventLoop,
         host: str = "0.0.0.0",
         port: int = 2100,
@@ -70,7 +70,8 @@ class HueDtlsServer:
         Initialize the server (no socket until :meth:`start`).
 
         :param psk_provider: Maps a PSK identity (username) to its PSK bytes, or None.
-        :param on_frame: Called on the event loop with each decrypted application record.
+        :param on_frame: Called on the event loop with the authenticated PSK identity (the
+            client's username) and each decrypted application record.
         :param loop: The asyncio loop to dispatch decoded frames onto.
         :param host: Interface to bind to.
         :param port: UDP port to listen on (2100 for Hue Entertainment).
@@ -173,6 +174,7 @@ class HueDtlsServer:
         if psk is None:
             LOGGER.warning("Inbound DTLS: unknown PSK identity %r", identity)
             return
+        self._identity = identity
         self._transcript.extend(full)
         self._derive_keys(psk)
 
@@ -190,7 +192,7 @@ class HueDtlsServer:
     def _handle_application_data(self, fragment: bytes) -> None:
         """Decrypt an application-data record and dispatch it to the loop."""
         plaintext = self._decrypt(_CT_APPLICATION_DATA, fragment)
-        self._loop.call_soon_threadsafe(self._on_frame, plaintext)
+        self._loop.call_soon_threadsafe(self._on_frame, self._identity, plaintext)
 
     # -- crypto / record layer --
 
@@ -308,6 +310,7 @@ class HueDtlsServer:
 
     def _reset(self) -> None:
         """Reset all per-handshake state."""
+        self._identity = ""
         self._cookie = b""
         self._client_random = b""
         self._server_random = b""

@@ -79,8 +79,13 @@ class InboundStreamer:
         except ValueError:
             return None
 
-    def _on_frame(self, data: bytes) -> None:
-        """Decode a HueStream frame and submit each color to the engine."""
+    def _on_frame(self, identity: str, data: bytes) -> None:
+        """
+        Decode a HueStream frame and submit each color to the engine.
+
+        :param identity: The DTLS-authenticated username of the TV that sent the frame.
+        :param data: The decrypted HueStream application record.
+        """
         frame = decode_huestream(data)
         if frame is None:
             if not self._logged_undecoded:
@@ -89,8 +94,10 @@ class InboundStreamer:
                     "Inbound frame not decoded (%d bytes, head=%s)", len(data), data[:16].hex()
                 )
             return
-        # Resolve against the lights of the TV that owns the active stream.
-        owner = self._engine.stream_owner
+        # Resolve against the sending TV's own lights. Using the DTLS identity (not the engine's
+        # transient stream owner, which is cleared on teardown) lets streaming auto-recover after
+        # an idle timeout or a network blip: the next frame re-adopts the owner via submit_color.
+        owner = identity or self._engine.stream_owner
         lights = tv_lights(self._store, owner)
         if not self._logged_frame:
             self._logged_frame = True

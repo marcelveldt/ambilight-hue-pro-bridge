@@ -21,15 +21,15 @@ _USERNAME = "test-user"
 async def test_server_handshakes_with_lib_client() -> None:
     """The lib client pairs with the server and a sent frame is decrypted and decoded."""
     loop = asyncio.get_running_loop()
-    received: list[bytes] = []
+    received: list[tuple[str, bytes]] = []
 
     def psk(identity: str) -> bytes | None:
         """Return the PSK for the known username."""
         return bytes.fromhex(_CLIENT_KEY) if identity == _USERNAME else None
 
-    def on_frame(data: bytes) -> None:
-        """Collect a decrypted application-data record."""
-        received.append(data)
+    def on_frame(identity: str, data: bytes) -> None:
+        """Collect the authenticated identity and a decrypted application-data record."""
+        received.append((identity, data))
 
     server = HueDtlsServer(
         psk_provider=psk,
@@ -56,7 +56,9 @@ async def test_server_handshakes_with_lib_client() -> None:
                 break
             await asyncio.sleep(0.02)
         assert received, "server did not receive a decrypted frame"
-        frame = decode_huestream(received[0])
+        identity, payload = received[0]
+        assert identity == _USERNAME
+        frame = decode_huestream(payload)
         assert frame is not None
         assert frame.is_v2
         assert frame.colors[0].target == 0

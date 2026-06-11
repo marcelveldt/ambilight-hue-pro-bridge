@@ -65,7 +65,7 @@ def test_v1_frame_forwards_each_color_by_light_id(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(
         "ambilight_hue_bridge.emulator.inbound.decode_huestream", lambda _data: frame
     )
-    streamer._on_frame(b"x")
+    streamer._on_frame("u1", b"x")
     assert engine.colors == [("u1", "1", (10, 20, 30)), ("u1", "2", (1, 2, 3))]
 
 
@@ -77,7 +77,7 @@ def test_v2_frame_maps_channel_index_and_drops_out_of_range(tmp_path: Path, monk
     monkeypatch.setattr(
         "ambilight_hue_bridge.emulator.inbound.decode_huestream", lambda _data: frame
     )
-    streamer._on_frame(b"x")
+    streamer._on_frame("u1", b"x")
     assert engine.colors == [("u1", "1", (1, 1, 1))]
 
 
@@ -88,5 +88,22 @@ def test_undecodable_frame_is_a_noop(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "ambilight_hue_bridge.emulator.inbound.decode_huestream", lambda _data: None
     )
-    streamer._on_frame(b"garbage")
+    streamer._on_frame("u1", b"garbage")
     assert engine.colors == []
+
+
+def test_frame_uses_dtls_identity_when_engine_owner_cleared(tmp_path: Path, monkeypatch) -> None:
+    """After a teardown clears the engine owner, the DTLS identity still resolves the TV's lights.
+
+    This is the auto-recovery path: an idle timeout or network blip tears the outbound stream
+    down and clears ``stream_owner``; the next inbound frame must re-adopt the owner from its
+    authenticated identity so streaming restarts on its own.
+    """
+    engine = _RecordingEngine(None)  # owner cleared by a prior teardown
+    streamer = _streamer(tmp_path, engine)
+    frame = _FakeFrame(is_v2=True, colors=[_FakeColor(0, (7, 8, 9))])
+    monkeypatch.setattr(
+        "ambilight_hue_bridge.emulator.inbound.decode_huestream", lambda _data: frame
+    )
+    streamer._on_frame("u1", b"x")
+    assert engine.colors == [("u1", "1", (7, 8, 9))]
