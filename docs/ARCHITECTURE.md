@@ -215,8 +215,7 @@ virtual_bridge:
   mac: null                          # null => auto-detect from the host; drives bridgeid/UDN/serial
   enable_inbound_dtls: true          # inbound DTLS server for 2019+ Android TVs (UDP 2100)
   enable_mdns: true                  # advertise _hue._tcp via mDNS (when HTTPS is up)
-  stream_rate_hz: 50                 # outbound frame rate to the real bridge
-  stream_smoothing: 0.5              # temporal easing (0 = off/snappy, capped at 0.95)
+  stream_rate_hz: 50                 # outbound frame rate to the real bridge (config-only, no UI)
 
 real_bridges:                        # one or more real Hue bridges (V2 square or Pro)
   - id: "192-168-1-50"
@@ -224,6 +223,7 @@ real_bridges:                        # one or more real Hue bridges (V2 square o
     app_key: "<clip v2 username>"
     client_key: "<32 hex PSK>"       # for the entertainment DTLS stream
     model: "v2"                      # "v2" | "pro" (informational; same code path)
+    cached_areas: []                 # last-seen areas; serves the UI while the bridge is down
 active_real_bridge: "192-168-1-50"   # which bridge TVs stream to (empty => the first)
 
 users:                               # paired TVs; each is assigned an area in the web UI
@@ -233,6 +233,7 @@ users:                               # paired TVs; each is assigned an area in t
     created: "2026-06-10T12:00:00"
     entertainment_area: "<v2 rid>"   # the real-bridge area this TV drives ("" => no lights)
     split_gradients: true            # expose each gradient zone as its own virtual light
+    stream_smoothing: null           # per-TV temporal easing (null/0 = off, capped at 0.95)
     lights:                          # what the TV sees; rebuilt from the area on assignment
       - id: "1"
         name: "Ambilight Left"
@@ -241,9 +242,12 @@ users:                               # paired TVs; each is assigned an area in t
         channels: [0]                # real-bridge entertainment channel ids this light drives
 ```
 
-Notes: lights resolve **per TV** — an unassigned TV (`entertainment_area: ""`) sees no lights
-and does not stream. Each TV's `lights` are rebuilt from its assigned area when you set it in
-the web UI (split gradients = one virtual light per zone, else one per device). The advertised
+Notes: lights resolve **per TV** — a TV with no area (`entertainment_area: ""`) sees no lights
+and does not stream. A freshly paired TV is auto-assigned the active bridge's first area (from
+`cached_areas`, so it works even mid discovery-dance); each TV's `lights` are rebuilt from its
+assigned area when you (re)set it in the web UI (split gradients = one virtual light per zone,
+else one per device). Temporal easing is **per TV** (`stream_smoothing`) — fast DTLS TVs want 0,
+~1 Hz REST TVs want easing to fill the gaps. The advertised
 `swversion`/`apiversion`/`datastoreversion` and the bridge model id live in `const.py`; the
 HTTP/HTTPS ports are command-line options, not persisted. State fields emitted to the TV are
 strictly int-typed, and every exposed light advertises `capabilities.streaming`.

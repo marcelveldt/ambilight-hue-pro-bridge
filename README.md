@@ -7,7 +7,8 @@ for **multi-zone / gradient lights**.
 > **Status:** working and in real use. Discovery (SSDP + mDNS), pairing, the v1 REST API, the
 > web UI, per-TV configuration, and the outbound + inbound Entertainment streaming are all
 > implemented and verified live against both an older (2018) and a newer (2022, Android)
-> Ambilight TV. Not yet packaged as a Docker image / Home Assistant add-on (see [Status](#status)).
+> Ambilight TV. Packaged as a multi-arch Docker image (published to GHCR on every release) and
+> as a Home Assistant add-on (see [Installation](#installation)).
 
 ## Why this exists
 
@@ -62,8 +63,9 @@ just fails. To force the TV onto the virtual bridge:
 1. **Unplug your real Hue bridge.**
 2. **Restart (power-cycle) the TV** — this clears its cached bridge.
 3. **Start the Ambilight+Hue setup wizard on the TV** — it now discovers the virtual bridge.
-4. Once paired, **plug the real bridge back in** (it's where the colours are streamed to) and
-   assign the TV an entertainment area in the web UI.
+4. Once paired, **plug the real bridge back in** (it's where the colours are streamed to). The
+   TV is auto-assigned your first entertainment area, so its lights light up straight away —
+   reassign it (or split its gradient strips) in the web UI if you want something different.
 
 The bridge it's cached to sticks across reboots, so this is a one-time step per TV.
 
@@ -93,16 +95,46 @@ The service is built from a few focused, decoupled components:
   Bridge V2 and Hue Bridge Pro"*).
 - **Web UI + config store** — pair the real bridge, then assign each paired TV an
   entertainment area (optionally splitting its gradient strips into per-zone virtual
-  lights). A TV has no lights until it's assigned an area.
+  lights). New TVs default to your first area; until a bridge is paired a TV has no lights
+  and doesn't stream.
 
 > Detailed protocol notes and the module map live in
 > [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Installation
 
-Run it from source (see [Development](#development) below). Packaging as a multi-arch Docker
-image and a Home Assistant OS add-on is planned. Because the service answers SSDP/mDNS multicast
-and presents a virtual bridge on the LAN, it needs to run with **host networking**.
+Because the service answers SSDP/mDNS multicast and presents a virtual bridge on the LAN, it
+must run with **host networking** whichever way you deploy it.
+
+### Home Assistant add-on
+
+Add this repository to **Settings → Add-ons → Add-on Store → ⋮ → Repositories**:
+
+```
+https://github.com/marcelveldt/ambilight-hue-pro-bridge
+```
+
+Then install **Ambilight+Hue Pro Bridge** and open its web UI at `http://<ha-host>:80`. See
+[addon/README.md](addon/README.md) for details.
+
+### Docker
+
+A multi-arch image (amd64/arm64) is published to GHCR on every release:
+
+```bash
+docker run -d --name ambilight-hue-bridge \
+  --network host \
+  --restart unless-stopped \
+  -v ambilight-hue-bridge-data:/data \
+  ghcr.io/marcelveldt/ambilight-hue-pro-bridge:latest
+```
+
+Then open the web UI at `http://<host>:80`. State (bridge credentials, log) lives in the
+`/data` volume.
+
+### From source
+
+See [Development](#development) below.
 
 ## Development
 
@@ -122,8 +154,8 @@ python -m ambilight_hue_bridge --log-level DEBUG
 sudo ambilight-hue-bridge --http-port 80 --https-port 443 --log-level DEBUG
 
 # then open the web UI at http://<host>:<http-port> (e.g. http://<host>:8080) to pair
-# your Hue bridge (press the link button first). A freshly paired TV has no lights;
-# assign it an entertainment area in the UI to expose that area's lights. A
+# your Hue bridge (press the link button first). A freshly paired TV is auto-assigned your
+# first entertainment area; reassign it or split its gradient strips in the UI. A
 # `pair` / `areas` CLI is also available for headless setup.
 #
 # logs go to the console and a rotating file at <data-dir>/bridge.log (override with
@@ -153,12 +185,13 @@ Implemented and working end-to-end:
 - **Engine** — per-TV light/area mapping, gradient-zone split, per-TV temporal smoothing, light
   identify (blink), and idle teardown.
 - **Web UI** — bridge pairing, per-TV area assignment + smoothing, and TV removal.
+- **Packaging** — a multi-arch (amd64/arm64) Docker image published to GHCR on every release,
+  and a Home Assistant add-on wrapping it.
 
 Verified live against an older (2018) and a newer (2022, Android) Ambilight TV, streaming to a
 Hue Pro bridge.
 
-Planned: a multi-arch Docker image and a Home Assistant OS add-on, plus continued verification of
-the TV wire protocol across more models.
+Planned: continued verification of the TV wire protocol across more models.
 
 ## Credits
 

@@ -16,7 +16,8 @@ from ambilight_hue_bridge.config.models import (
     VirtualLight,
 )
 from ambilight_hue_bridge.config.store import ConfigStore
-from ambilight_hue_bridge.web.server import WebServer, _mirror_from_area
+from ambilight_hue_bridge.outbound.controller import lights_from_area
+from ambilight_hue_bridge.web.server import WebServer
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -42,18 +43,6 @@ async def test_status_reports_bridge_id(aiohttp_client, web_setup) -> None:
     data = await (await client.get("/cfg/status")).json()
     assert data["bridge_id"] == "AABBCCFFFEDDEEFF"
     assert data["streaming"] is False
-
-
-async def test_settings_get_and_put_clamps(aiohttp_client, web_setup) -> None:
-    """The global rate is read and updated, with out-of-range values clamped."""
-    app, store = web_setup
-    client = await aiohttp_client(app)
-    current = await (await client.get("/cfg/settings")).json()
-    assert current["stream_rate_hz"] == 50
-    assert "stream_smoothing" not in current  # smoothing is per-TV, not global
-    updated = await (await client.put("/cfg/settings", json={"stream_rate_hz": 999})).json()
-    assert updated["stream_rate_hz"] == 60
-    assert store.config.virtual_bridge.stream_rate_hz == 60
 
 
 async def test_tvs_lists_paired_users(aiohttp_client, web_setup) -> None:
@@ -155,7 +144,7 @@ def test_mirror_labels_gradient_zones_by_position() -> None:
             LightChannel(channel_id=2, service_id="g", name="Strip", position=(0.9, 0.0, 0.0)),
         ],
     )
-    names = [light.name for light in _mirror_from_area(area, split_gradients=True)]
+    names = [light.name for light in lights_from_area(area, split_gradients=True)]
     assert names == ["Strip (far left)", "Strip (center)", "Strip (far right)"]
 
 
@@ -243,7 +232,7 @@ def test_mirror_caps_long_names_to_32_chars() -> None:
             ),
         ],
     )
-    names = [light.name for light in _mirror_from_area(area, split_gradients=True)]
+    names = [light.name for light in lights_from_area(area, split_gradients=True)]
     assert all(len(n) <= 32 for n in names)
     assert names[0].endswith("(far left)")
     assert names[1].endswith("(far right)")
@@ -259,8 +248,8 @@ def test_mirror_merges_gradient_when_not_split() -> None:
             LightChannel(channel_id=1, service_id="grad", name="Strip", position=(0.5, 0.0, 0.0)),
         ],
     )
-    assert len(_mirror_from_area(area, split_gradients=True)) == 2
-    merged = _mirror_from_area(area, split_gradients=False)
+    assert len(lights_from_area(area, split_gradients=True)) == 2
+    merged = lights_from_area(area, split_gradients=False)
     assert len(merged) == 1
     assert merged[0].channels == [0, 1]
 
