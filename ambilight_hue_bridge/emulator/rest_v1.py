@@ -199,6 +199,7 @@ class HueV1Emulator:
                 web.post("/api/{user}/groups/", self._handle_create_group),
                 web.get("/api/{user}/groups/{group_id}", self._handle_group),
                 web.put("/api/{user}/groups/{group_id}", self._handle_group_put),
+                web.delete("/api/{user}/groups/{group_id}", self._handle_delete_group),
                 web.put("/api/{user}/groups/{group_id}/action", self._handle_group_action),
                 web.get("/api/{user}/capabilities", self._handle_capabilities),
                 web.get("/api/{user}/scenes", self._handle_empty),
@@ -393,13 +394,14 @@ class HueV1Emulator:
             # The TV re-reads the group to confirm it owns the stream before it begins the
             # DTLS HueStream; with owner left null it may refuse to start or tear down.
             group["stream"]["owner"] = user if active else None
-            if self._engine is not None:
-                if active:
-                    # Open the outbound stream now so the DTLS handshake to the real bridge is
-                    # done before the TV's first frames arrive (inbound server is always on).
-                    self._engine.start_stream(user)
-                elif owner == user:
-                    await self._engine.stop_stream()
+            if self._engine is not None and active:
+                # Open the outbound stream now so the DTLS handshake to the real bridge is done
+                # before the TV's first frames arrive (the inbound server is always on). We do
+                # NOT tear it down on active=false: the TV rapidly toggles the stream while in
+                # its configure menu, and a full reconnect (~4 s) per toggle thrashes the real
+                # bridge. Instead the engine keeps the stream warm and idle-times-out on its own
+                # once the TV stops sending frames.
+                self._engine.start_stream(user)
             LOGGER.info(
                 "TV %s entertainment stream for group %s",
                 "started" if active else "stopped",
@@ -412,6 +414,17 @@ class HueV1Emulator:
                     self._groups[group_id][key] = body[key]
                 result.append({"success": {f"/groups/{group_id}/{key}": body[key]}})
         return _json(result or [{"success": {}}])
+
+    async def _handle_delete_group(self, request: web.Request) -> web.StreamResponse:
+        """Delete a group (DELETE /api/{user}/groups/{group_id}); TVs do this to re-configure."""
+        if (unauthorized := self._unauthorized(request)) is not None:
+            return unauthorized
+        group_id = request.match_info["group_id"]
+        removed = self._groups.pop(group_id, None)
+        # If the TV was streaming the group it just deleted, stop the outbound stream.
+        if removed is not None and self._engine is not None and self._engine.is_streaming:
+            await self._engine.stop_stream()
+        return _json([{"success": f"/groups/{group_id} deleted"}])
 
     async def _handle_group_action(self, request: web.Request) -> web.StreamResponse:
         """Apply a group action (PUT /api/{user}/groups/{group_id}/action)."""

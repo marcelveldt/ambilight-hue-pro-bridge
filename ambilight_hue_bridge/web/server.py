@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -10,7 +11,7 @@ import aiohttp
 from aiohttp import web
 from hue_entertainment import discover_bridges
 
-from ambilight_hue_bridge.config.models import VirtualLight
+from ambilight_hue_bridge.config.models import CachedArea, CachedChannel, VirtualLight
 from ambilight_hue_bridge.const import (
     MAX_STREAM_RATE_HZ,
     MAX_STREAM_SMOOTHING,
@@ -28,6 +29,9 @@ LOGGER = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _PAIR_ERRORS = (TimeoutError, OSError, aiohttp.ClientError)
+# Cap how long we'll wait on the real bridge when listing areas, so an unreachable bridge
+# (e.g. unplugged during TV pairing) fails fast instead of hanging the web UI.
+_LIST_AREAS_TIMEOUT = 5.0
 
 
 class WebServer:
@@ -96,33 +100,20 @@ class WebServer:
         )
 
     async def _handle_get_settings(self, _request: web.Request) -> web.StreamResponse:
-        """Return the live streaming settings (smoothing + frame rate)."""
+        """Return the global streaming settings (the outbound frame rate)."""
         bridge = self._store.config.virtual_bridge
-        return web.json_response(
-            {"stream_smoothing": bridge.stream_smoothing, "stream_rate_hz": bridge.stream_rate_hz},
-        )
+        return web.json_response({"stream_rate_hz": bridge.stream_rate_hz})
 
     async def _handle_put_settings(self, request: web.Request) -> web.StreamResponse:
-        """
-        Update the streaming settings.
-
-        ``stream_smoothing`` takes effect immediately (the engine reads it per frame);
-        ``stream_rate_hz`` applies on the next restart.
-        """
+        """Update the outbound frame rate (applies on the next restart)."""
         body = await _read_json(request)
         bridge = self._store.config.virtual_bridge
-        if "stream_smoothing" in body:
-            bridge.stream_smoothing = max(
-                0.0, min(MAX_STREAM_SMOOTHING, float(body["stream_smoothing"]))
-            )
         if "stream_rate_hz" in body:
             bridge.stream_rate_hz = max(
                 MIN_STREAM_RATE_HZ, min(MAX_STREAM_RATE_HZ, int(body["stream_rate_hz"]))
             )
         self._store.save()
-        return web.json_response(
-            {"stream_smoothing": bridge.stream_smoothing, "stream_rate_hz": bridge.stream_rate_hz},
-        )
+        return web.json_response({"stream_rate_hz": bridge.stream_rate_hz})
 
     async def _handle_tvs(self, _request: web.Request) -> web.StreamResponse:
         """List the paired TVs, their assigned area + lights, and which one is streaming."""
@@ -177,17 +168,35 @@ class WebServer:
         return web.json_response({"deleted": username})
 
     async def _handle_areas_list(self, _request: web.Request) -> web.StreamResponse:
-        """List the active bridge's entertainment areas (for per-TV assignment)."""
-        bridge = active_bridge(self._store)
-        if bridge is None or not bridge.app_key:
-            return web.json_response([])
-        try:
-            areas = await list_areas(bridge.host, bridge.app_key)
-        except _PAIR_ERRORS as err:
-            return web.json_response({"error": str(err)}, status=502)
+        """List the active bridge's entertainment areas (live, falling back to the cache)."""
+        areas = await self._list_areas()
         return web.json_response(
             [{"id": area.id, "name": area.name, "channels": len(area.channels)} for area in areas],
         )
+
+    async def _list_areas(self) -> list[Any]:
+        """
+        Return the active bridge's entertainment areas, refreshing the persisted cache.
+
+        On success the areas are cached on the bridge; if the bridge is unreachable (e.g.
+        unplugged during the TV discovery dance) the last cached areas are returned, so the web
+        UI and per-TV assignment keep working without the real bridge online.
+        """
+        bridge = active_bridge(self._store)
+        if bridge is None or not bridge.app_key:
+            return []
+        try:
+            areas = await asyncio.wait_for(
+                list_areas(bridge.host, bridge.app_key), timeout=_LIST_AREAS_TIMEOUT
+            )
+        except _PAIR_ERRORS as err:
+            LOGGER.debug(
+                "Listing areas failed (%s); using %d cached", err, len(bridge.cached_areas)
+            )
+            return bridge.cached_areas
+        bridge.cached_areas = _areas_to_cache(areas)
+        self._store.save()
+        return areas
 
     async def _handle_discover(self, _request: web.Request) -> web.StreamResponse:
         """Discover Hue bridges on the local network via mDNS."""
@@ -248,26 +257,13 @@ class WebServer:
             "streaming": user.username == owner,
             "entertainment_area": user.entertainment_area,
             "split_gradients": user.split_gradients,
-            "stream_smoothing": user.stream_smoothing,
-            "effective_smoothing": (
-                user.stream_smoothing
-                if user.stream_smoothing is not None
-                else self._store.config.virtual_bridge.stream_smoothing
-            ),
+            "stream_smoothing": user.stream_smoothing if user.stream_smoothing is not None else 0.0,
             "lights": [light.name for light in user.lights],
         }
 
     async def _area_by_id(self, area_id: str) -> Any:
-        """Return the active bridge's entertainment area with the given id, or None."""
-        bridge = active_bridge(self._store)
-        if bridge is None or not bridge.app_key:
-            return None
-        try:
-            areas = await list_areas(bridge.host, bridge.app_key)
-        except _PAIR_ERRORS as err:
-            LOGGER.debug("Could not list areas: %s", err)
-            return None
-        return next((area for area in areas if area.id == area_id), None)
+        """Return the active bridge's entertainment area with the given id (live or cached)."""
+        return next((area for area in await self._list_areas() if area.id == area_id), None)
 
     def _bridge_dict(self, bridge: RealBridge) -> dict[str, Any]:
         """Build the JSON representation of a real bridge for the UI."""
@@ -296,6 +292,26 @@ async def _read_json(request: web.Request) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _areas_to_cache(areas: list[Any]) -> list[CachedArea]:
+    """Convert live ``EntertainmentArea`` objects into the persistable cache form."""
+    return [
+        CachedArea(
+            id=area.id,
+            name=area.name,
+            channels=[
+                CachedChannel(
+                    channel_id=channel.channel_id,
+                    service_id=channel.service_id,
+                    name=channel.name,
+                    position=list(channel.position),
+                )
+                for channel in area.channels
+            ],
+        )
+        for area in areas
+    ]
+
+
 def _position_from_x(x: float) -> str:
     """Map an entertainment channel's x position to a coarse screen position."""
     if x < -0.3:
@@ -303,6 +319,27 @@ def _position_from_x(x: float) -> str:
     if x > 0.3:
         return "right"
     return "center"
+
+
+# Hue v1 light names are capped at 32 chars; longer names are rejected and some TVs then show
+# a generic "light N" instead of the real name.
+_MAX_LIGHT_NAME = 32
+
+
+def _fit_name(base: str, position: str = "") -> str:
+    """
+    Build a light name within Hue's 32-char limit, keeping the position suffix readable.
+
+    The base (which repeats across a strip's zones) is truncated first; the position suffix
+    (which is what distinguishes the zones) is always preserved.
+
+    :param base: The source light/zone name.
+    :param position: Optional on-screen position appended as " (position)".
+    """
+    if not position:
+        return base[:_MAX_LIGHT_NAME].rstrip()
+    tail = f" ({position})"
+    return f"{base[: _MAX_LIGHT_NAME - len(tail)].rstrip()}{tail}"
 
 
 def _mirror_from_area(area: Any, *, split_gradients: bool = True) -> list[VirtualLight]:
@@ -328,7 +365,7 @@ def _mirror_from_area(area: Any, *, split_gradients: bool = True) -> list[Virtua
         return [
             VirtualLight(
                 id=str(index + 1),
-                name=merged[key]["name"] or f"Light {index + 1}",
+                name=_fit_name(merged[key]["name"] or f"Light {index + 1}"),
                 position=_position_from_x(merged[key]["x"]),
                 channels=merged[key]["channels"],
             )
@@ -347,9 +384,9 @@ def _mirror_from_area(area: Any, *, split_gradients: bool = True) -> list[Virtua
             label = _zone_label(channel.position)
             seen[label] = seen.get(label, 0) + 1
             suffix = label if seen[label] == 1 else f"{label} {seen[label]}"
-            name = f"{base} ({suffix})"
+            name = _fit_name(base, suffix)
         else:
-            name = base
+            name = _fit_name(base)
         lights.append(
             VirtualLight(
                 id=str(index + 1),

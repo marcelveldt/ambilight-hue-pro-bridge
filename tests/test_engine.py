@@ -133,8 +133,9 @@ async def test_engine_streams_on_submit(tmp_path: Path, monkeypatch) -> None:
 def test_smoothing_eases_toward_target(tmp_path: Path) -> None:
     """Smoothing jumps to the target on first sight, then eases toward later targets."""
     store = _configured_store(tmp_path)
-    store.config.virtual_bridge.stream_smoothing = 0.5
+    store.config.users[0].stream_smoothing = 0.5
     engine = Engine(store)
+    engine._stream_owner = "tv1"  # resolve smoothing from this TV's per-TV setting
     lights = store.config.users[0].lights
     engine._buffer.set_color("1", (100, 200, 40))
     engine._apply_smoothing(lights)
@@ -147,10 +148,11 @@ def test_smoothing_eases_toward_target(tmp_path: Path) -> None:
 
 
 def test_smoothing_off_is_instant(tmp_path: Path) -> None:
-    """With smoothing 0.0 the streamed color tracks the target exactly each tick."""
+    """With smoothing 0.0 (a TV's default) the streamed color tracks the target exactly."""
     store = _configured_store(tmp_path)
-    store.config.virtual_bridge.stream_smoothing = 0.0
+    store.config.users[0].stream_smoothing = 0.0
     engine = Engine(store)
+    engine._stream_owner = "tv1"
     lights = store.config.users[0].lights
     engine._buffer.set_color("1", (100, 200, 40))
     engine._apply_smoothing(lights)
@@ -219,16 +221,15 @@ async def test_identify_opens_a_stream(tmp_path: Path, monkeypatch) -> None:
     await engine.stop()
 
 
-def test_resolve_smoothing_prefers_per_tv_override(tmp_path: Path) -> None:
-    """Smoothing resolves to the owning TV's override when set, else the global default."""
+def test_resolve_smoothing_is_per_tv_else_off(tmp_path: Path) -> None:
+    """Smoothing resolves to the owning TV's value, defaulting to 0 (off) when unset."""
     store = _configured_store(tmp_path)
-    store.config.virtual_bridge.stream_smoothing = 0.5
     engine = Engine(store)
-    assert engine._resolve_smoothing() == 0.5  # no owner -> global default
+    assert engine._resolve_smoothing() == 0.0  # no owner -> off
     engine._stream_owner = "tv1"
-    assert engine._resolve_smoothing() == 0.5  # tv1 has no override yet
-    store.config.users[0].stream_smoothing = 0.0
-    assert engine._resolve_smoothing() == 0.0  # per-TV override wins
+    assert engine._resolve_smoothing() == 0.0  # tv1 has no value set -> off
+    store.config.users[0].stream_smoothing = 0.6
+    assert engine._resolve_smoothing() == 0.6  # the TV's own setting
 
 
 def test_submit_color_adopts_owner_only_once(tmp_path: Path) -> None:

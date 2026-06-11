@@ -51,6 +51,22 @@ The app sits on your LAN between the TV and your real Hue bridge:
 4. An **entertainment client** streams the result to the real bridge over DTLS for
    minimal latency.
 
+## Connecting a TV
+
+Pair your real Hue bridge in the web UI first, then run the **Ambilight+Hue** setup on the TV.
+
+If you also have a **real Hue bridge on the network** (e.g. a Hue Pro), the TV may discover
+*that* instead of the virtual one — and because the Pro dropped Ambilight+Hue support, that path
+just fails. To force the TV onto the virtual bridge:
+
+1. **Unplug your real Hue bridge.**
+2. **Restart (power-cycle) the TV** — this clears its cached bridge.
+3. **Start the Ambilight+Hue setup wizard on the TV** — it now discovers the virtual bridge.
+4. Once paired, **plug the real bridge back in** (it's where the colours are streamed to) and
+   assign the TV an entertainment area in the web UI.
+
+The bridge it's cached to sticks across reboots, so this is a one-time step per TV.
+
 ## Features
 
 - 🪟 Web interface for configuration

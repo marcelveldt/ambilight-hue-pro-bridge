@@ -8,7 +8,13 @@ import pytest
 from aiohttp import web
 from hue_entertainment import DiscoveredBridge, EntertainmentArea, LightChannel
 
-from ambilight_hue_bridge.config.models import PairedUser, RealBridge, VirtualLight
+from ambilight_hue_bridge.config.models import (
+    CachedArea,
+    CachedChannel,
+    PairedUser,
+    RealBridge,
+    VirtualLight,
+)
 from ambilight_hue_bridge.config.store import ConfigStore
 from ambilight_hue_bridge.web.server import WebServer, _mirror_from_area
 
@@ -39,18 +45,15 @@ async def test_status_reports_bridge_id(aiohttp_client, web_setup) -> None:
 
 
 async def test_settings_get_and_put_clamps(aiohttp_client, web_setup) -> None:
-    """Streaming settings are read and updated, with out-of-range values clamped."""
+    """The global rate is read and updated, with out-of-range values clamped."""
     app, store = web_setup
     client = await aiohttp_client(app)
     current = await (await client.get("/cfg/settings")).json()
-    assert current["stream_smoothing"] == 0.5
     assert current["stream_rate_hz"] == 50
-    updated = await (
-        await client.put("/cfg/settings", json={"stream_smoothing": 1.5, "stream_rate_hz": 999})
-    ).json()
-    assert updated["stream_smoothing"] == 0.95
+    assert "stream_smoothing" not in current  # smoothing is per-TV, not global
+    updated = await (await client.put("/cfg/settings", json={"stream_rate_hz": 999})).json()
     assert updated["stream_rate_hz"] == 60
-    assert store.config.virtual_bridge.stream_smoothing == 0.95
+    assert store.config.virtual_bridge.stream_rate_hz == 60
 
 
 async def test_tvs_lists_paired_users(aiohttp_client, web_setup) -> None:
@@ -93,6 +96,8 @@ async def test_areas_list(aiohttp_client, web_setup, monkeypatch) -> None:
     areas = await (await client.get("/cfg/areas")).json()
     assert areas[0]["id"] == "area-1"
     assert areas[0]["channels"] == 2
+    # A successful live fetch also refreshes the persisted cache.
+    assert store.config.real_bridges[0].cached_areas[0].id == "area-1"
 
 
 async def test_delete_tv(aiohttp_client, web_setup) -> None:
@@ -121,25 +126,22 @@ async def test_assign_smoothing_override_does_not_rebuild_lights(aiohttp_client,
         ),
     ]
     client = await aiohttp_client(app)
-    tv = await (await client.put("/cfg/tvs/u1", json={"stream_smoothing": 0.0})).json()
-    assert tv["stream_smoothing"] == 0.0
-    assert tv["effective_smoothing"] == 0.0
+    tv = await (await client.put("/cfg/tvs/u1", json={"stream_smoothing": 0.6})).json()
+    assert tv["stream_smoothing"] == 0.6
     # Not rebuilt (no list_areas call needed; the existing light names are preserved).
     assert tv["lights"] == ["Left", "Right"]
-    assert store.config.users[0].stream_smoothing == 0.0
+    assert store.config.users[0].stream_smoothing == 0.6
 
 
-async def test_tv_effective_smoothing_falls_back_to_global(aiohttp_client, web_setup) -> None:
-    """A TV with no override reports the global default as its effective smoothing."""
+async def test_tv_smoothing_defaults_to_off(aiohttp_client, web_setup) -> None:
+    """A TV with no smoothing set reports 0 (off) — there is no global default."""
     app, store = web_setup
-    store.config.virtual_bridge.stream_smoothing = 0.7
     store.config.users = [
         PairedUser(username="u1", clientkey="k", devicetype="TV", created="2026-06-11"),
     ]
     client = await aiohttp_client(app)
     tvs = await (await client.get("/cfg/tvs")).json()
-    assert tvs[0]["stream_smoothing"] is None
-    assert tvs[0]["effective_smoothing"] == 0.7
+    assert tvs[0]["stream_smoothing"] == 0.0
 
 
 def test_mirror_labels_gradient_zones_by_position() -> None:
@@ -155,6 +157,96 @@ def test_mirror_labels_gradient_zones_by_position() -> None:
     )
     names = [light.name for light in _mirror_from_area(area, split_gradients=True)]
     assert names == ["Strip (far left)", "Strip (center)", "Strip (far right)"]
+
+
+def _cached_bridge(store: ConfigStore) -> None:
+    """Give the store an active bridge whose areas are already cached (real bridge offline)."""
+    store.config.real_bridges = [
+        RealBridge(
+            id="b",
+            host="1.2.3.4",
+            app_key="u",
+            client_key="k",
+            cached_areas=[
+                CachedArea(
+                    id="area-1",
+                    name="Living",
+                    channels=[
+                        CachedChannel(channel_id=0, name="c0", position=[-0.9, 0.8, 0.0]),
+                        CachedChannel(channel_id=1, name="c1", position=[0.9, 0.8, 0.0]),
+                    ],
+                ),
+            ],
+        ),
+    ]
+    store.config.active_real_bridge = "b"
+
+
+async def test_areas_served_from_cache_when_bridge_unreachable(
+    aiohttp_client, web_setup, monkeypatch
+) -> None:
+    """When the bridge is unplugged, /cfg/areas serves the cached areas so the TV setup works."""
+    app, store = web_setup
+    _cached_bridge(store)
+
+    async def boom(_host: str, _app_key: str) -> object:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("ambilight_hue_bridge.web.server.list_areas", boom)
+    client = await aiohttp_client(app)
+    areas = await (await client.get("/cfg/areas")).json()
+    assert areas[0]["id"] == "area-1"
+    assert areas[0]["channels"] == 2
+
+
+async def test_assign_tv_uses_cached_area_when_bridge_unreachable(
+    aiohttp_client, web_setup, monkeypatch
+) -> None:
+    """A TV can be assigned an area (and get lights) from the cache while the bridge is offline."""
+    app, store = web_setup
+    _cached_bridge(store)
+    store.config.users = [
+        PairedUser(username="u1", clientkey="k", devicetype="TV", created="2026-06-11"),
+    ]
+
+    async def boom(_host: str, _app_key: str) -> object:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("ambilight_hue_bridge.web.server.list_areas", boom)
+    client = await aiohttp_client(app)
+    tv = await (
+        await client.put(
+            "/cfg/tvs/u1", json={"entertainment_area": "area-1", "split_gradients": True}
+        )
+    ).json()
+    assert tv["entertainment_area"] == "area-1"
+    assert tv["lights"] == ["c0", "c1"]
+
+
+def test_mirror_caps_long_names_to_32_chars() -> None:
+    """Long source names are truncated to Hue's 32-char limit, keeping the position suffix."""
+    area = EntertainmentArea(
+        id="a",
+        name="A",
+        channels=[
+            LightChannel(
+                channel_id=0,
+                service_id="g",
+                name="Woonkamer Gradient lichtstrip",
+                position=(-0.9, 0.0, 0.0),
+            ),
+            LightChannel(
+                channel_id=1,
+                service_id="g",
+                name="Woonkamer Gradient lichtstrip",
+                position=(0.9, 0.0, 0.0),
+            ),
+        ],
+    )
+    names = [light.name for light in _mirror_from_area(area, split_gradients=True)]
+    assert all(len(n) <= 32 for n in names)
+    assert names[0].endswith("(far left)")
+    assert names[1].endswith("(far right)")
 
 
 def test_mirror_merges_gradient_when_not_split() -> None:

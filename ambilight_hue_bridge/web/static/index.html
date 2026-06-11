@@ -64,18 +64,13 @@
   </p>
   <div id="tvs"><p class="muted">No TVs paired yet — add this bridge from the TV's Ambilight+Hue menu.</p></div>
 
-  <h2>③ Default smoothness</h2>
+  <h2>③ Advanced</h2>
   <p class="muted">
-    Eases a TV's abrupt Ambilight colours into fades. Higher = smoother but more lag;
-    0 = off (snappy but steppy). This is the <em>default</em> — each TV can override it above
-    (fast DTLS-streaming TVs want ~0; ~1 Hz TVs want more). Applies live; the rate needs a restart.
+    Outbound frame rate to your Hue bridge. The bridge tops out around 50–60 Hz; leave it at 50
+    unless you have a reason to change it. Applies on restart. (Smoothness is per-TV, above.)
   </p>
   <div class="card">
     <div class="row">
-      <label for="smoothing">Smoothing</label>
-      <input id="smoothing" type="range" min="0" max="0.95" step="0.05" style="flex:1" oninput="onSmoothing()" />
-      <span id="smoothing-val" class="badge">0.50</span>
-      <span class="spacer"></span>
       <label for="rate">Rate</label>
       <input id="rate" type="number" min="1" max="60" size="3" onchange="onRate()" /><span class="muted">Hz</span>
     </div>
@@ -176,18 +171,7 @@ async function discover() {
 
 async function loadSettings() {
   const s = await api("/cfg/settings");
-  document.getElementById("smoothing").value = s.stream_smoothing;
-  document.getElementById("smoothing-val").textContent = Number(s.stream_smoothing).toFixed(2);
   document.getElementById("rate").value = s.stream_rate_hz;
-}
-
-let smoothingTimer = null;
-function onSmoothing() {
-  const v = Number(document.getElementById("smoothing").value);
-  document.getElementById("smoothing-val").textContent = v.toFixed(2);
-  // Debounce the live PUT while the slider is dragged.
-  clearTimeout(smoothingTimer);
-  smoothingTimer = setTimeout(() => putSettings({ stream_smoothing: v }), 150);
 }
 
 function onRate() {
@@ -203,7 +187,11 @@ function putSettings(body) {
 }
 
 async function loadTvs() {
-  const [tvs, areas] = await Promise.all([api("/cfg/tvs"), api("/cfg/areas")]);
+  const tvs = await api("/cfg/tvs");
+  // Areas only fill the per-TV dropdown; if the bridge is unreachable (e.g. unplugged during
+  // TV pairing) that must not hide the TV list itself.
+  let areas = [];
+  try { areas = await api("/cfg/areas"); } catch (e) { /* show TVs without area options */ }
   const container = document.getElementById("tvs");
   container.innerHTML = "";
   if (!tvs.length) {
@@ -228,8 +216,7 @@ function renderTv(tv, areas) {
   const lights = (tv.lights && tv.lights.length)
     ? tv.lights.join(", ")
     : "— none yet; pick an area above to give this TV its lights";
-  const smooth = Number(tv.effective_smoothing ?? 0.5);
-  const smoothTag = tv.stream_smoothing != null ? "" : " (default)";
+  const smooth = Number(tv.stream_smoothing ?? 0);
   card.innerHTML =
     `<div class="row"><strong>${tv.devicetype || "TV"}</strong>`
     + `<span class="muted">${tv.created ? "paired " + tv.created : ""}</span>`
@@ -240,7 +227,10 @@ function renderTv(tv, areas) {
     + ` split gradient zones</label></div>`
     + `<div class="row" style="margin-top:.3rem"><span class="muted">Smoothness</span>`
     + `<input data-smooth type="range" min="0" max="0.95" step="0.05" value="${smooth}" style="flex:1"/>`
-    + `<span class="badge" data-smooth-val>${smooth.toFixed(2)}${smoothTag}</span></div>`
+    + `<span class="badge" data-smooth-val>${smooth.toFixed(2)}</span></div>`
+    + `<div class="row"><span class="muted" style="font-size:.85rem">Eases abrupt colours into `
+    + `fades. Leave at 0 for newer (fast) TVs; raise it for older ~1 Hz TVs to fill the gaps.`
+    + `</span></div>`
     + `<div class="row" style="margin-top:.3rem"><span class="muted">Lights: ${lights}</span></div>`
     + `<span class="error" data-err></span>`;
   const sel = card.querySelector("[data-area]");

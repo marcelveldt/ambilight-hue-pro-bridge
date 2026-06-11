@@ -207,13 +207,13 @@ class Engine:
             )
 
     def _resolve_smoothing(self) -> float:
-        """Return the owning TV's smoothing override, or the global default if it has none."""
+        """Return the owning TV's smoothing setting, or 0.0 (off) when it has none."""
         owner = self._stream_owner
         if owner:
             for user in self._store.config.users:
                 if user.username == owner and user.stream_smoothing is not None:
                     return user.stream_smoothing
-        return self._store.config.virtual_bridge.stream_smoothing
+        return 0.0
 
     def _apply_identify(self) -> None:
         """Overlay a full-white blink on lights the TV asked to identify; expire finished ones."""

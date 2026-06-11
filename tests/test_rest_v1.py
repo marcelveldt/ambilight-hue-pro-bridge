@@ -265,7 +265,7 @@ async def test_create_group_accepts_trailing_slash(aiohttp_client, emulator_setu
 
 
 async def test_single_stream_guard_denies_a_second_tv(aiohttp_client, tmp_path) -> None:
-    """While one TV streams, a second is denied (307); the owner may re-activate and stop."""
+    """While one TV streams, a second is denied (307); the same owner may re-activate."""
     app, store, engine = _build_emulator_with_engine(tmp_path)
     store.config.users = [_assigned_user("u1"), _assigned_user("u2")]
     client = await aiohttp_client(app)
@@ -283,8 +283,20 @@ async def test_single_stream_guard_denies_a_second_tv(aiohttp_client, tmp_path) 
     again = await (await client.put("/api/u1/groups/200", json={"stream": {"active": True}})).json()
     assert again[0]["success"]["/groups/200/stream/active"] is True
 
+
+async def test_deactivate_keeps_the_stream_warm(aiohttp_client, tmp_path) -> None:
+    """A stream active=false does NOT tear down the outbound stream (it idle-times-out instead).
+
+    The TV toggles the stream rapidly in its configure menu; a full reconnect per toggle thrashes
+    the real bridge, so we keep it warm and let the engine idle it.
+    """
+    app, store, engine = _build_emulator_with_engine(tmp_path)
+    store.config.users = [_assigned_user("u1")]
+    client = await aiohttp_client(app)
+    await client.put("/api/u1/groups/200", json={"stream": {"active": True}})
     await client.put("/api/u1/groups/200", json={"stream": {"active": False}})
-    assert engine.stopped == 1
+    assert engine.started == ["u1"]
+    assert engine.stopped == 0  # not torn down on deactivate
 
 
 async def test_non_dict_stream_body_does_not_500(aiohttp_client, tmp_path) -> None:
@@ -303,6 +315,19 @@ async def test_light_state_alert_triggers_identify(aiohttp_client, tmp_path) -> 
     client = await aiohttp_client(app)
     await client.put("/api/u1/lights/1/state", json={"alert": "lselect"})
     assert engine.identified == [("u1", "1", True)]
+
+
+async def test_delete_group(aiohttp_client, tmp_path) -> None:
+    """A group can be deleted (TVs do this to re-configure entertainment)."""
+    app, store, _engine = _build_emulator_with_engine(tmp_path)
+    store.config.users = [_assigned_user("u1")]
+    client = await aiohttp_client(app)
+    await client.post("/api/u1/groups/", json={"lights": ["1", "2"], "type": "Entertainment"})
+    resp = await client.delete("/api/u1/groups/1")
+    assert resp.status == 200
+    assert "deleted" in (await resp.json())[0]["success"]
+    groups = await (await client.get("/api/u1/groups")).json()
+    assert "1" not in groups
 
 
 async def test_group_action_fans_out_to_engine(aiohttp_client, tmp_path) -> None:

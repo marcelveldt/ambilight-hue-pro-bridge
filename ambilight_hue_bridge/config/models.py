@@ -36,8 +36,8 @@ class PairedUser:
     entertainment_area: str = ""
     split_gradients: bool = True
     lights: list[VirtualLight] = field(default_factory=list)
-    # Per-TV smoothing override (None => use the global default). DTLS-streaming TVs send a fast,
-    # already-smooth stream and want ~0; ~1 Hz REST TVs want easing to fill the gaps.
+    # Per-TV temporal easing (None/0 => off). Fast DTLS-streaming TVs are already smooth and want
+    # 0; the ~1 Hz REST TVs (older models) want easing to fill the gaps between updates.
     stream_smoothing: float | None = None
 
 
@@ -55,10 +55,25 @@ class VirtualBridge:
     enable_mdns: bool = True
     # Outbound frame rate to the real bridge, in Hz (the bridge tops out around 50-60).
     stream_rate_hz: int = DEFAULT_STREAM_RATE_HZ
-    # Temporal easing applied to the TV's colors before forwarding: the fraction of the
-    # previous frame retained each tick (0.0 = off/instant but abrupt, higher = smoother but
-    # laggier). Smooths the TV's stepwise Ambilight into fades; ~0.5 is a good balance.
-    stream_smoothing: float = 0.5
+
+
+@dataclass
+class CachedChannel:
+    """A cached entertainment channel (mirrors hue_entertainment.LightChannel for offline use)."""
+
+    channel_id: int
+    service_id: str = ""
+    name: str = ""
+    position: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+
+
+@dataclass
+class CachedArea:
+    """A cached entertainment area, so the bridge can serve areas while the real bridge is down."""
+
+    id: str
+    name: str
+    channels: list[CachedChannel] = field(default_factory=list)
 
 
 @dataclass
@@ -71,6 +86,9 @@ class RealBridge:
     client_key: str = ""
     # "v2" (square) or "pro" - informational; both use the same CLIP v2 + DTLS path.
     model: str = "v2"
+    # Last-seen entertainment areas, refreshed whenever we reach the bridge. Lets the web UI and
+    # per-TV assignment keep working while the bridge is briefly unplugged (the discovery dance).
+    cached_areas: list[CachedArea] = field(default_factory=list)
 
 
 @dataclass
