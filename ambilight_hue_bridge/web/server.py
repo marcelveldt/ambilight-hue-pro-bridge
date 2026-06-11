@@ -11,14 +11,15 @@ import aiohttp
 from aiohttp import web
 from hue_entertainment import discover_bridges
 
-from ambilight_hue_bridge.config.models import CachedArea, CachedChannel, VirtualLight
-from ambilight_hue_bridge.const import (
-    MAX_STREAM_RATE_HZ,
-    MAX_STREAM_SMOOTHING,
-    MIN_STREAM_RATE_HZ,
-)
+from ambilight_hue_bridge.config.models import CachedArea, CachedChannel
+from ambilight_hue_bridge.const import MAX_STREAM_SMOOTHING
 from ambilight_hue_bridge.identity import bridge_id
-from ambilight_hue_bridge.outbound.controller import active_bridge, list_areas, pair_and_store
+from ambilight_hue_bridge.outbound.controller import (
+    active_bridge,
+    lights_from_area,
+    list_areas,
+    pair_and_store,
+)
 
 if TYPE_CHECKING:
     from ambilight_hue_bridge.config.models import PairedUser, RealBridge
@@ -67,8 +68,6 @@ class WebServer:
             [
                 web.get("/", self._handle_index),
                 web.get("/cfg/status", self._handle_status),
-                web.get("/cfg/settings", self._handle_get_settings),
-                web.put("/cfg/settings", self._handle_put_settings),
                 web.get("/cfg/tvs", self._handle_tvs),
                 web.put("/cfg/tvs/{username}", self._handle_assign_tv),
                 web.delete("/cfg/tvs/{username}", self._handle_delete_tv),
@@ -98,22 +97,6 @@ class WebServer:
                 "active_real_bridge": config.active_real_bridge,
             },
         )
-
-    async def _handle_get_settings(self, _request: web.Request) -> web.StreamResponse:
-        """Return the global streaming settings (the outbound frame rate)."""
-        bridge = self._store.config.virtual_bridge
-        return web.json_response({"stream_rate_hz": bridge.stream_rate_hz})
-
-    async def _handle_put_settings(self, request: web.Request) -> web.StreamResponse:
-        """Update the outbound frame rate (applies on the next restart)."""
-        body = await _read_json(request)
-        bridge = self._store.config.virtual_bridge
-        if "stream_rate_hz" in body:
-            bridge.stream_rate_hz = max(
-                MIN_STREAM_RATE_HZ, min(MAX_STREAM_RATE_HZ, int(body["stream_rate_hz"]))
-            )
-        self._store.save()
-        return web.json_response({"stream_rate_hz": bridge.stream_rate_hz})
 
     async def _handle_tvs(self, _request: web.Request) -> web.StreamResponse:
         """List the paired TVs, their assigned area + lights, and which one is streaming."""
@@ -147,7 +130,7 @@ class WebServer:
             if user.entertainment_area:
                 area = await self._area_by_id(user.entertainment_area)
                 user.lights = (
-                    _mirror_from_area(area, split_gradients=user.split_gradients) if area else []
+                    lights_from_area(area, split_gradients=user.split_gradients) if area else []
                 )
             else:
                 user.lights = []
@@ -310,103 +293,3 @@ def _areas_to_cache(areas: list[Any]) -> list[CachedArea]:
         )
         for area in areas
     ]
-
-
-def _position_from_x(x: float) -> str:
-    """Map an entertainment channel's x position to a coarse screen position."""
-    if x < -0.3:
-        return "left"
-    if x > 0.3:
-        return "right"
-    return "center"
-
-
-# Hue v1 light names are capped at 32 chars; longer names are rejected and some TVs then show
-# a generic "light N" instead of the real name.
-_MAX_LIGHT_NAME = 32
-
-
-def _fit_name(base: str, position: str = "") -> str:
-    """
-    Build a light name within Hue's 32-char limit, keeping the position suffix readable.
-
-    The base (which repeats across a strip's zones) is truncated first; the position suffix
-    (which is what distinguishes the zones) is always preserved.
-
-    :param base: The source light/zone name.
-    :param position: Optional on-screen position appended as " (position)".
-    """
-    if not position:
-        return base[:_MAX_LIGHT_NAME].rstrip()
-    tail = f" ({position})"
-    return f"{base[: _MAX_LIGHT_NAME - len(tail)].rstrip()}{tail}"
-
-
-def _mirror_from_area(area: Any, *, split_gradients: bool = True) -> list[VirtualLight]:
-    """
-    Build the virtual lights the TV sees from a source entertainment area.
-
-    With ``split_gradients`` each channel becomes its own light (so the TV can drive each
-    gradient zone separately, numbered when they share a name). Otherwise channels of the same
-    light (e.g. a gradient strip's zones) are merged into one light driving all its channels.
-
-    :param area: An EntertainmentArea from the hue_entertainment library.
-    :param split_gradients: Expose each channel as a separate light (vs one light per device).
-    """
-    if not split_gradients:
-        merged: dict[str, dict[str, Any]] = {}
-        order: list[str] = []
-        for channel in area.channels:
-            key = channel.service_id or channel.name
-            if key not in merged:
-                merged[key] = {"name": channel.name, "x": channel.position[0], "channels": []}
-                order.append(key)
-            merged[key]["channels"].append(channel.channel_id)
-        return [
-            VirtualLight(
-                id=str(index + 1),
-                name=_fit_name(merged[key]["name"] or f"Light {index + 1}"),
-                position=_position_from_x(merged[key]["x"]),
-                channels=merged[key]["channels"],
-            )
-            for index, key in enumerate(order)
-        ]
-    name_counts: dict[str, int] = {}
-    for channel in area.channels:
-        name_counts[channel.name] = name_counts.get(channel.name, 0) + 1
-    seen: dict[str, int] = {}
-    lights: list[VirtualLight] = []
-    for index, channel in enumerate(area.channels):
-        base = channel.name or f"Zone {index + 1}"
-        if name_counts.get(channel.name, 0) > 1:
-            # Same-named gradient zones: disambiguate by on-screen position so the user can tell
-            # them apart (e.g. "Strip (left)") instead of an opaque "Strip 1".
-            label = _zone_label(channel.position)
-            seen[label] = seen.get(label, 0) + 1
-            suffix = label if seen[label] == 1 else f"{label} {seen[label]}"
-            name = _fit_name(base, suffix)
-        else:
-            name = _fit_name(base)
-        lights.append(
-            VirtualLight(
-                id=str(index + 1),
-                name=name,
-                position=_position_from_x(channel.position[0]),
-                channels=[channel.channel_id],
-            ),
-        )
-    return lights
-
-
-def _zone_label(position: Any) -> str:
-    """Describe a channel's horizontal screen position from its x coordinate (left..right)."""
-    x = position[0]
-    if x < -0.6:
-        return "far left"
-    if x < -0.2:
-        return "left"
-    if x > 0.6:
-        return "far right"
-    if x > 0.2:
-        return "right"
-    return "center"

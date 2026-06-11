@@ -1,0 +1,20 @@
+name: Ambilight+Hue Pro Bridge
+version: "0.0.0"
+slug: ambilight_hue_pro_bridge
+description: >-
+  Bridge older Philips Ambilight+Hue TVs to a modern Philips Hue (V2/Pro) bridge
+  over the low-latency Entertainment API.
+url: https://github.com/marcelveldt/ambilight-hue-pro-bridge
+# Prebuilt multi-arch image published to GHCR on each release; Home Assistant pulls
+# <image>:<version> and Docker selects the matching architecture from the manifest.
+image: ghcr.io/marcelveldt/ambilight-hue-pro-bridge
+arch:
+  - aarch64
+  - amd64
+# The bridge answers SSDP/mDNS multicast and presents a virtual Hue bridge on the LAN, so it
+# must share the host's network namespace.
+host_network: true
+# The image runs a plain Python process that handles SIGTERM itself; no s6 init wrapper needed.
+init: false
+boot: auto
+startup: application

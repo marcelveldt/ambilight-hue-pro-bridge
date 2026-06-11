@@ -63,18 +63,6 @@
     one TV streams at a time.
   </p>
   <div id="tvs"><p class="muted">No TVs paired yet — add this bridge from the TV's Ambilight+Hue menu.</p></div>
-
-  <h2>③ Advanced</h2>
-  <p class="muted">
-    Outbound frame rate to your Hue bridge. The bridge tops out around 50–60 Hz; leave it at 50
-    unless you have a reason to change it. Applies on restart. (Smoothness is per-TV, above.)
-  </p>
-  <div class="card">
-    <div class="row">
-      <label for="rate">Rate</label>
-      <input id="rate" type="number" min="1" max="60" size="3" onchange="onRate()" /><span class="muted">Hz</span>
-    </div>
-  </div>
 </main>
 
 <script>
@@ -169,23 +157,6 @@ async function discover() {
   }
 }
 
-async function loadSettings() {
-  const s = await api("/cfg/settings");
-  document.getElementById("rate").value = s.stream_rate_hz;
-}
-
-function onRate() {
-  putSettings({ stream_rate_hz: Number(document.getElementById("rate").value) });
-}
-
-function putSettings(body) {
-  return api("/cfg/settings", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  }).catch(() => {});
-}
-
 async function loadTvs() {
   const tvs = await api("/cfg/tvs");
   // Areas only fill the per-TV dropdown; if the bridge is unreachable (e.g. unplugged during
@@ -272,7 +243,6 @@ function renderTv(tv, areas) {
 
 async function refresh() {
   const [, bridges] = await Promise.all([loadStatus(), loadBridges()]);
-  await loadSettings();
   await loadTvs();
   // First-run convenience: scan for bridges automatically when none are configured yet.
   if (!bridges.length) discover();

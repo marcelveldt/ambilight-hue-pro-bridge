@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ambilight_hue_bridge.config.models import PairedUser
+from ambilight_hue_bridge.outbound.controller import active_bridge, lights_from_area
 
 if TYPE_CHECKING:
     from ambilight_hue_bridge.config.store import ConfigStore
@@ -45,6 +46,7 @@ class PairingManager:
             devicetype=devicetype,
             created=datetime.now(UTC).isoformat(timespec="seconds"),
         )
+        self._auto_assign_area(user)
         self._store.config.users.append(user)
         self._store.save()
         LOGGER.info("Paired new client %r (username %s)", devicetype, user.username)
@@ -56,3 +58,19 @@ class PairingManager:
             if user.username == username:
                 return user.clientkey or None
         return None
+
+    def _auto_assign_area(self, user: PairedUser) -> None:
+        """
+        Give a freshly paired TV the active bridge's first entertainment area by default.
+
+        This spares the user the "no lights found" dead end on the TV right after pairing: a TV
+        with no area exposes no lights. They can reassign it in the web UI afterwards. Uses the
+        cached areas so it works even during the discovery dance (real bridge briefly unplugged).
+        """
+        bridge = active_bridge(self._store)
+        if bridge is None or not bridge.cached_areas:
+            return
+        area = bridge.cached_areas[0]
+        user.entertainment_area = area.id
+        user.lights = lights_from_area(area, split_gradients=user.split_gradients)
+        LOGGER.info("Auto-assigned area %r (%s) to new TV", area.name, area.id)

@@ -43,12 +43,10 @@ BRIDGE_DATASTORE_VERSION: Final = "126"
 UDN_PREFIX: Final = "2f402f80-da50-11e1-9b23-"
 UPNP_SERVER: Final = "Linux/3.14.0 UPnP/1.0 IpBridge/1.67.0"
 
-# Outbound streaming bounds, shared by the engine clamp and the web settings API. The Hue
-# bridge tops out around 50-60 Hz; smoothing is capped below 1.0 because 1.0 would mean the
-# eased color never converges on its target (a frozen output).
+# Outbound streaming bounds. The Hue bridge tops out around 50-60 Hz; per-TV smoothing is
+# capped below 1.0 because 1.0 would mean the eased color never converges on its target (a
+# frozen output). The frame rate is a config-only field (no UI), defaulting to 50 Hz.
 DEFAULT_STREAM_RATE_HZ: Final = 50
-MIN_STREAM_RATE_HZ: Final = 1
-MAX_STREAM_RATE_HZ: Final = 60
 MAX_STREAM_SMOOTHING: Final = 0.95
 
 # devicetype registered with the real bridge when pairing; shown in the Hue app's list of
