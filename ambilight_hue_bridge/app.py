@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import socket
 from typing import TYPE_CHECKING
 
+import aiohttp
 from aiohttp import web
 
 from .config.store import ConfigStore
@@ -26,6 +28,12 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+# Home Assistant Supervisor self-info endpoint, used to discover the dynamically-assigned
+# ingress port. Reachable from add-ons (even host_network ones) at the fixed "supervisor" host;
+# SUPERVISOR_TOKEN is injected into every add-on's environment.
+_SUPERVISOR_INFO_URL = "http://supervisor/addons/self/info"
+_SUPERVISOR_TIMEOUT = 10.0
+
 
 def get_host_ip() -> str:
     """Return the host's primary LAN IPv4 address (falls back to loopback)."""
@@ -38,6 +46,33 @@ def get_host_ip() -> str:
         return "127.0.0.1"
     finally:
         sock.close()
+
+
+async def _supervisor_ingress_port() -> int | None:
+    """
+    Return the Home Assistant Supervisor's assigned ingress port, or None.
+
+    None when not running as an add-on (no ``SUPERVISOR_TOKEN``), when ingress is disabled, or
+    when the Supervisor API can't be reached - the service then simply runs without the sidebar
+    UI (the web UI is still served on the HTTP port).
+    """
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if not token:
+        return None
+    timeout = aiohttp.ClientTimeout(total=_SUPERVISOR_TIMEOUT)
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        async with (
+            aiohttp.ClientSession(timeout=timeout, headers=headers) as session,
+            session.get(_SUPERVISOR_INFO_URL) as response,
+        ):
+            response.raise_for_status()
+            payload = await response.json()
+    except (aiohttp.ClientError, TimeoutError) as err:
+        LOGGER.warning("Could not query the Supervisor API for the ingress port: %s", err)
+        return None
+    port = payload.get("data", {}).get("ingress_port") if isinstance(payload, dict) else None
+    return int(port) if port else None
 
 
 class BridgeApp:
@@ -66,6 +101,7 @@ class BridgeApp:
         self._ssdp: SSDPServer | None = None
         self._mdns: MDNSAdvertiser | None = None
         self._runner: web.AppRunner | None = None
+        self._ingress_runner: web.AppRunner | None = None
 
     async def run(self) -> None:
         """Start all services and run until :meth:`request_stop` (or cancellation)."""
@@ -118,6 +154,10 @@ class BridgeApp:
         # never use the cert. Enable it (--https-port) only for a future CLIP-v2/TLS client.
         https_port = await self._start_https(runner, mac, host_ip)
 
+        # When running as a Home Assistant add-on, also serve the web UI on the Supervisor's
+        # ingress port so it appears in the HA sidebar (HA handles auth). No-op otherwise.
+        await self._start_ingress(web_server)
+
         # Primary discovery is SSDP: the current Ambilight TVs find the bridge via SSDP
         # M-SEARCH + the UPnP descriptor on HTTP. mDNS is added below as belt-and-suspenders.
         ssdp = SSDPServer(
@@ -167,6 +207,9 @@ class BridgeApp:
         if self._ssdp is not None:
             await self._ssdp.stop()
             self._ssdp = None
+        if self._ingress_runner is not None:
+            await self._ingress_runner.cleanup()
+            self._ingress_runner = None
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
@@ -213,3 +256,29 @@ class BridgeApp:
             self._https_port,
         )
         return self._https_port
+
+    async def _start_ingress(self, web_server: WebServer) -> None:
+        """
+        Serve the web UI on the Home Assistant ingress port, when running as an add-on.
+
+        A separate, UI-only listener (no TV-facing Hue API) bound to the Supervisor-assigned
+        ingress port; the UI rewrites its <base> from the ``X-Ingress-Path`` header so it works
+        behind the HA proxy. A no-op outside the add-on (no ``SUPERVISOR_TOKEN``).
+
+        :param web_server: The web server whose UI routes are mounted on the ingress listener.
+        """
+        port = await _supervisor_ingress_port()
+        if not port:
+            return
+        app = web.Application(middlewares=[log_requests])
+        web_server.register(app)
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        try:
+            await web.TCPSite(runner, host="0.0.0.0", port=port).start()
+        except OSError as err:
+            LOGGER.warning("Could not start the ingress UI listener on port %d: %s", port, err)
+            await runner.cleanup()
+            return
+        self._ingress_runner = runner
+        LOGGER.info("Ingress UI listening on port %d (Home Assistant sidebar)", port)

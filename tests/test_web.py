@@ -255,12 +255,24 @@ def test_mirror_merges_gradient_when_not_split() -> None:
 
 
 async def test_index_is_served(aiohttp_client, web_setup) -> None:
-    """The single-page UI is served at the root."""
+    """The single-page UI is served at the root with a root <base> for direct access."""
     app, _store = web_setup
     client = await aiohttp_client(app)
     resp = await client.get("/")
     assert resp.status == 200
-    assert "Ambilight" in await resp.text()
+    body = await resp.text()
+    assert "Ambilight" in body
+    assert '<base href="/" />' in body
+
+
+async def test_index_rewrites_base_for_ingress(aiohttp_client, web_setup) -> None:
+    """Behind HA ingress the <base> is rewritten to the X-Ingress-Path prefix."""
+    app, _store = web_setup
+    client = await aiohttp_client(app)
+    resp = await client.get("/", headers={"X-Ingress-Path": "/api/hassio_ingress/abc123"})
+    body = await resp.text()
+    assert '<base href="/api/hassio_ingress/abc123/" />' in body
+    assert '<base href="/" />' not in body
 
 
 async def test_pair_adds_and_activates_bridge(aiohttp_client, web_setup, monkeypatch) -> None:

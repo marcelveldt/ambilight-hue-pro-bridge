@@ -114,8 +114,8 @@ Add this repository to **Settings → Add-ons → Add-on Store → ⋮ → Repos
 https://github.com/marcelveldt/ambilight-hue-pro-bridge
 ```
 
-Then install **Ambilight+Hue Pro Bridge** and open its web UI at `http://<ha-host>:80`. See
-[addon/README.md](addon/README.md) for details.
+Then install **Ambilight+Hue Pro Bridge** and open its web UI — from the HA sidebar (ingress) or
+directly at `http://<ha-host>:80`. See [addon/README.md](addon/README.md) for details.
 
 ### Docker
 

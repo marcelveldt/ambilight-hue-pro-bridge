@@ -13,8 +13,9 @@ over the low-latency Entertainment API.
 2. Open the **⋮** menu (top right) → **Repositories**, and add:
    `https://github.com/marcelveldt/ambilight-hue-pro-bridge`
 3. Install the **Ambilight+Hue Pro Bridge** add-on and start it.
-4. Open the web UI at `http://<your-ha-host>:80` to pair your real Hue bridge and assign each
-   TV an entertainment area.
+4. Open the web UI — either **Open Web UI** on the add-on page / the **Ambilight Bridge** sidebar
+   entry (ingress, no extra port), or directly at `http://<your-ha-host>:80`. Pair your real Hue
+   bridge and assign each TV an entertainment area.
 
 ## Configuration
 

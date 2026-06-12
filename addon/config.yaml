@@ -14,6 +14,12 @@ arch:
 # The bridge answers SSDP/mDNS multicast and presents a virtual Hue bridge on the LAN, so it
 # must share the host's network namespace.
 host_network: true
+# Expose the config web UI in the HA sidebar via ingress (HA handles auth). With host_network
+# the ingress port is assigned dynamically (0); the service reads it from the Supervisor API.
+ingress: true
+ingress_port: 0
+panel_icon: mdi:television-ambient-light
+panel_title: Ambilight Bridge
 # The image runs a plain Python process that handles SIGTERM itself; no s6 init wrapper needed.
 init: false
 boot: auto

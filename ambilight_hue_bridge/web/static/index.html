@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <!-- Rewritten by the server to the HA ingress path when proxied; stays "/" for direct access.
+       All fetch() URLs below are relative so they resolve against this base. -->
+  <base href="/" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Ambilight+Hue Pro Bridge</title>
   <style>
@@ -74,7 +77,7 @@ async function api(path, opts) {
 }
 
 async function loadStatus() {
-  const s = await api("/cfg/status");
+  const s = await api("cfg/status");
   document.getElementById("title").textContent = s.name;
   const streaming = s.streaming ? "● streaming" : "○ idle";
   document.getElementById("subtitle").textContent =
@@ -82,7 +85,7 @@ async function loadStatus() {
 }
 
 async function loadBridges() {
-  const bridges = await api("/cfg/bridges");
+  const bridges = await api("cfg/bridges");
   const container = document.getElementById("bridges");
   container.innerHTML = bridges.length ? "" : '<p class="muted">No bridges paired yet.</p>';
   for (const b of bridges) container.appendChild(renderBridge(b));
@@ -101,7 +104,7 @@ function renderBridge(b) {
   card.querySelector("[data-del]").onclick = async () => {
     err.textContent = "";
     try {
-      await api(`/cfg/bridges/${b.id}`, { method: "DELETE" });
+      await api(`cfg/bridges/${b.id}`, { method: "DELETE" });
       await refresh();
     } catch (e) { err.textContent = String(e.message || e); }
   };
@@ -117,7 +120,7 @@ async function pair() {
   btn.disabled = true;
   status.textContent = "Press the link button on the bridge… (waiting up to 30s)";
   try {
-    await api("/cfg/bridges/pair", {
+    await api("cfg/bridges/pair", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ host }),
@@ -140,7 +143,7 @@ async function discover() {
   btn.disabled = true;
   out.innerHTML = '<span class="muted">Searching for bridges… (a few seconds)</span>';
   try {
-    const found = await api("/cfg/discover");
+    const found = await api("cfg/discover");
     if (!found.length) { out.innerHTML = '<span class="muted">No bridges found.</span>'; return; }
     out.innerHTML = "";
     for (const b of found) {
@@ -158,11 +161,11 @@ async function discover() {
 }
 
 async function loadTvs() {
-  const tvs = await api("/cfg/tvs");
+  const tvs = await api("cfg/tvs");
   // Areas only fill the per-TV dropdown; if the bridge is unreachable (e.g. unplugged during
   // TV pairing) that must not hide the TV list itself.
   let areas = [];
-  try { areas = await api("/cfg/areas"); } catch (e) { /* show TVs without area options */ }
+  try { areas = await api("cfg/areas"); } catch (e) { /* show TVs without area options */ }
   const container = document.getElementById("tvs");
   container.innerHTML = "";
   if (!tvs.length) {
@@ -209,7 +212,7 @@ function renderTv(tv, areas) {
   const smoothEl = card.querySelector("[data-smooth]");
   const smoothVal = card.querySelector("[data-smooth-val]");
   const err = card.querySelector("[data-err]");
-  const put = (body) => api(`/cfg/tvs/${encodeURIComponent(tv.username)}`, {
+  const put = (body) => api(`cfg/tvs/${encodeURIComponent(tv.username)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -234,7 +237,7 @@ function renderTv(tv, areas) {
   card.querySelector("[data-del]").onclick = async () => {
     err.textContent = "";
     try {
-      await api(`/cfg/tvs/${encodeURIComponent(tv.username)}`, { method: "DELETE" });
+      await api(`cfg/tvs/${encodeURIComponent(tv.username)}`, { method: "DELETE" });
       await loadTvs();
     } catch (e) { err.textContent = String(e.message || e); }
   };

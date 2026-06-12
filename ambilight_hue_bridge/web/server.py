@@ -61,6 +61,9 @@ class WebServer:
         self._mac = mac
         self._host_ip = host_ip
         self._http_port = http_port
+        # Cached once so the index handler can inject the ingress <base> per request without
+        # blocking file I/O on the event loop.
+        self._index_html = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
     def register(self, app: web.Application) -> None:
         """Register the web UI page and its JSON config API (under /cfg) on the app."""
@@ -80,9 +83,16 @@ class WebServer:
             ],
         )
 
-    async def _handle_index(self, _request: web.Request) -> web.StreamResponse:
-        """Serve the single-page configuration UI."""
-        return web.FileResponse(_STATIC_DIR / "index.html")
+    async def _handle_index(self, request: web.Request) -> web.StreamResponse:
+        """Serve the single-page configuration UI, rewriting the <base> for HA ingress."""
+        # Behind Home Assistant ingress the page is served under /api/hassio_ingress/<token>/;
+        # point <base> there so the UI's relative requests resolve against that prefix. Without
+        # the header (direct/Docker access) the base stays "/".
+        ingress_path = request.headers.get("X-Ingress-Path")
+        html = self._index_html
+        if ingress_path:
+            html = html.replace('<base href="/" />', f'<base href="{ingress_path}/" />', 1)
+        return web.Response(text=html, content_type="text/html")
 
     async def _handle_status(self, _request: web.Request) -> web.StreamResponse:
         """Return the virtual bridge status and exposed lights."""
