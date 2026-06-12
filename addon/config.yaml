@@ -1,5 +1,5 @@
 name: Ambilight+Hue Pro Bridge
-version: "0.1.0"
+version: "0.2.0"
 slug: ambilight_hue_pro_bridge
 description: >-
   Bridge older Philips Ambilight+Hue TVs to a modern Philips Hue (V2/Pro) bridge
