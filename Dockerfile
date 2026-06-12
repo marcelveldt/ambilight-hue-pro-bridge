@@ -5,8 +5,13 @@ FROM python:3.13-slim
 # placeholder so local `docker build` still works.
 ARG VERSION=0.0.0
 
+# Container defaults, overridable with `docker run -e ...`. HTTP_PORT defaults to 80 because the
+# Ambilight TVs assume the Hue bridge is there; the Home Assistant add-on overrides these from its
+# options. Also settable: HTTPS_PORT, UI_PORT, LOG_LEVEL, LOG_FILE.
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    HTTP_PORT=80 \
+    LOG_LEVEL=info
 
 WORKDIR /app
 COPY . /app
@@ -27,4 +32,5 @@ VOLUME ["/data"]
 # append --https-port 443 to the entrypoint, and EXPOSE 443, only if a client needs it.)
 EXPOSE 80 1900/udp 2100/udp 5353/udp
 
-ENTRYPOINT ["ambilight-hue-bridge", "--data-dir", "/data", "--http-port", "80"]
+# Ports + log level come from the env above (HTTP_PORT, ...) or, under HA, the add-on options.
+ENTRYPOINT ["ambilight-hue-bridge", "--data-dir", "/data"]

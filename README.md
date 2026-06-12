@@ -129,6 +129,10 @@ docker run -d --name ambilight-hue-bridge \
   ghcr.io/marcelveldt/ambilight-hue-pro-bridge:latest
 ```
 
+Configure it with environment variables (`-e NAME=value`): `HTTP_PORT` (default 80, the Hue API
++ web UI), `UI_PORT` (serve the web UI on a separate port), `HTTPS_PORT` (TLS listener; 0 = off),
+`LOG_LEVEL` (`verbose`/`debug`/`info`/`warning`/`error`, default `info`), `LOG_FILE`, `DATA_DIR`.
+
 Then open the web UI at `http://<host>:80`. State (bridge credentials, log) lives in the
 `/data` volume.
 
@@ -144,22 +148,26 @@ Requires Python 3.13+.
 # create a virtualenv, install the package + dev deps, and set up pre-commit
 scripts/setup.sh
 
-# run the service — the Hue API and web UI share one port (--http-port, default 8080).
-# Discovery (SSDP on UDP 1900 + mDNS _hue._tcp) runs alongside, always on.
-python -m ambilight_hue_bridge --log-level DEBUG
+# run the service — the Hue API and web UI share one port (--http-port, default 8080); pass
+# --ui-port to serve the web UI on its own port instead. Discovery (SSDP on UDP 1900 + mDNS
+# _hue._tcp) runs alongside, always on. Every flag also has an env var (HTTP_PORT, UI_PORT,
+# HTTPS_PORT, LOG_LEVEL, LOG_FILE, DATA_DIR); precedence is flag > add-on options.json > env >
+# built-in default.
+python -m ambilight_hue_bridge --log-level debug
 
 # Ambilight TVs assume the Hue API is on port 80, so serve it there (binding 80 needs
 # privileges):
-sudo ambilight-hue-bridge --http-port 80 --log-level DEBUG
+sudo ambilight-hue-bridge --http-port 80 --log-level debug
 
 # then open the web UI at http://<host>:<http-port> (e.g. http://<host>:8080) to pair
 # your Hue bridge (press the link button first). A freshly paired TV is auto-assigned your
 # first entertainment area; reassign it or split its gradient strips in the UI. A
 # `pair` / `areas` CLI is also available for headless setup.
 #
-# logs go to the console and a rotating file at <data-dir>/bridge.log (override with
-# --log-file). A TLS listener is off by default; the tested TVs use plain HTTP. Add
-# --https-port 443 only if a future client needs TLS (over mDNS + HTTPS).
+# log levels: info (lifecycle events) < debug (the TVs' requests) < verbose (SSDP + the web
+# UI's own polling — the firehose). Logs go to the console and a rotating file at
+# <data-dir>/bridge.log (--log-file). A TLS listener is off by default; the tested TVs use
+# plain HTTP. Add --https-port 443 only if a future client needs TLS.
 
 # run the checks
 pre-commit run --all-files

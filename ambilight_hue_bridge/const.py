@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Final
 
 PACKAGE_NAME: Final = "ambilight_hue_bridge"
@@ -10,6 +11,16 @@ DISPLAY_NAME: Final = "Ambilight+Hue Pro Bridge"
 # Directory for persistent configuration and state.
 DEFAULT_DATA_DIR: Final = "data"
 CONFIG_FILENAME: Final = "config.yaml"
+# Home Assistant writes the add-on's UI options here, inside the data dir; read as a config
+# source when present (a no-op for plain Docker / source runs).
+ADDON_OPTIONS_FILENAME: Final = "options.json"
+
+# Custom log level below DEBUG (10) for the high-frequency trace noise - SSDP datagrams and the
+# web UI's own polling. At INFO you see lifecycle events; DEBUG adds the TV's requests; VERBOSE
+# adds the firehose. Registered here (next to the definition, idempotently) so the name resolves
+# and renders regardless of which module is imported first.
+VERBOSE: Final = 5
+logging.addLevelName(VERBOSE, "VERBOSE")
 # Rotating log file written under the data dir (in addition to the console) by default.
 LOG_FILENAME: Final = "bridge.log"
 

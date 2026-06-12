@@ -19,11 +19,19 @@ over the low-latency Entertainment API.
 
 ## Configuration
 
-The add-on has no options to set — everything is configured from its web UI. The bridge runs
-with **host networking** (required for SSDP/mDNS discovery and for the virtual bridge to appear
-on the LAN), so it binds host port **80** (Hue API + web UI). Make sure nothing else on the host
-already uses port 80. (A TLS listener on 443 is available but off by default — the TVs use plain
-HTTP.)
+The Hue bridge itself (real bridge pairing, per-TV areas) is configured from the web UI. The
+add-on has a few options on its **Configuration** tab:
+
+- **`http_port`** (default `80`) — the port the Hue API is served on. Ambilight TVs assume `80`;
+  only change it if something else on the host needs that port.
+- **`log_level`** (default `info`) — `info` (lifecycle events) / `debug` (the TVs' requests) /
+  `verbose` (SSDP + web-UI polling firehose) / `warning` / `error`.
+- **`https`** (default `false`) — enable the optional TLS listener on 443. The tested TVs use
+  plain HTTP, so leave it off unless a client needs TLS.
+
+The bridge runs with **host networking** (required for SSDP/mDNS discovery and for the virtual
+bridge to appear on the LAN), so it binds the host's `http_port`. Make sure nothing else on the
+host already uses it.
 
 State (your bridge credentials and the rotating log) is stored in the add-on's persistent
 `/data`, so it survives restarts and updates.

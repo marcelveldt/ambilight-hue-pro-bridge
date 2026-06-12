@@ -24,3 +24,13 @@ panel_title: Ambilight Bridge
 init: false
 boot: auto
 startup: application
+# User-set options. Home Assistant writes these to /data/options.json, which the service reads
+# on startup. http_port stays 80 for the Ambilight TVs; https enables the optional TLS listener.
+options:
+  log_level: info
+  http_port: 80
+  https: false
+schema:
+  log_level: list(verbose|debug|info|warning|error)
+  http_port: port
+  https: bool

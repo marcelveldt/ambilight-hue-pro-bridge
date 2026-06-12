@@ -16,6 +16,7 @@ from ambilight_hue_bridge.const import (
     BRIDGE_DATASTORE_VERSION,
     BRIDGE_MODEL_ID,
     BRIDGE_SW_VERSION,
+    VERBOSE,
 )
 from ambilight_hue_bridge.discovery.description import build_description_xml
 from ambilight_hue_bridge.identity import bridge_id, mac_with_colons
@@ -120,16 +121,15 @@ async def log_requests(request: web.Request, handler: Handler) -> web.StreamResp
 
     This doubles as the TV-capture trace: it surfaces unrouted probes (which would
     otherwise 404 silently), the scheme (so we see whether the TV uses HTTP or HTTPS) and
-    the status it received. The web UI's own ``/`` and ``/cfg`` polling is demoted to DEBUG.
+    the status it received. The TV's requests log at DEBUG; the web UI's own ``/`` and ``/cfg``
+    polling is demoted further to VERBOSE so DEBUG stays useful.
     """
     body = ""
     if request.can_read_body:
         # aiohttp caches the body, so handlers re-reading via request.json() still work.
         with suppress(Exception):
             body = await request.text()
-    level = (
-        logging.DEBUG if request.path == "/" or request.path.startswith("/cfg") else logging.INFO
-    )
+    level = VERBOSE if request.path == "/" or request.path.startswith("/cfg") else logging.DEBUG
     suffix = f"  body={body}" if body else ""
     try:
         response = await handler(request)

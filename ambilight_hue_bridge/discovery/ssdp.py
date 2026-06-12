@@ -13,6 +13,7 @@ from ambilight_hue_bridge.const import (
     SSDP_NOTIFY_INTERVAL,
     SSDP_PORT,
     UPNP_SERVER,
+    VERBOSE,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -73,20 +74,25 @@ class SSDPServer(asyncio.DatagramProtocol):
         if "M-SEARCH" not in message:
             return
         if "ssdp:discover" not in message:
-            LOGGER.debug("SSDP ignored non-discover datagram from %s:%d", addr[0], addr[1])
+            LOGGER.log(VERBOSE, "SSDP ignored non-discover datagram from %s:%d", addr[0], addr[1])
             return
         search_target = _header_value(message, "ST") or "?"
-        # Demoted to DEBUG: every UPnP device on the LAN M-SEARCHes constantly, so this is noise
-        # at INFO. The startup "listening/joined" lines stay at INFO.
-        LOGGER.debug(
-            "SSDP M-SEARCH from %s:%d (ST=%s) - responding", addr[0], addr[1], search_target
+        # VERBOSE: every UPnP device on the LAN M-SEARCHes constantly, so this is firehose noise.
+        # The startup "listening/joined" lines stay at INFO.
+        LOGGER.log(
+            VERBOSE,
+            "SSDP M-SEARCH from %s:%d (ST=%s) - responding",
+            addr[0],
+            addr[1],
+            search_target,
         )
         if self._transport is None:
             return
         responses = self._search_responses()
         for response in responses:
             self._transport.sendto(response, addr)
-        LOGGER.debug(
+        LOGGER.log(
+            VERBOSE,
             "SSDP sent %d response variant(s) to %s:%d, LOCATION=%s",
             len(responses),
             addr[0],
@@ -154,7 +160,8 @@ class SSDPServer(asyncio.DatagramProtocol):
         messages = self._notify_messages()
         for message in messages:
             self._transport.sendto(message, (SSDP_MCAST_ADDR, SSDP_PORT))
-        LOGGER.debug(
+        LOGGER.log(
+            VERBOSE,
             "SSDP broadcast %d ssdp:alive NOTIFY to %s:%d",
             len(messages),
             SSDP_MCAST_ADDR,
