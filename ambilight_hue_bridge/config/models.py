@@ -50,8 +50,8 @@ class VirtualBridge:
     mac: str | None = None
     # Listen for newer (Android) TVs that stream entertainment over inbound DTLS (UDP 2100).
     enable_inbound_dtls: bool = True
-    # Advertise the bridge over mDNS (_hue._tcp on the TLS port) for newer Hue clients, in
-    # addition to SSDP. Only takes effect when the HTTPS listener is up. LAN-only, additive.
+    # Advertise the bridge over mDNS (_hue._tcp) for newer Hue clients, in addition to SSDP.
+    # Points at the TLS port when HTTPS is enabled, otherwise the HTTP port. LAN-only, additive.
     enable_mdns: bool = True
     # Outbound frame rate to the real bridge, in Hz (the bridge tops out around 50-60).
     stream_rate_hz: int = DEFAULT_STREAM_RATE_HZ

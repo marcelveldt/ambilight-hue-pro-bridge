@@ -20,8 +20,9 @@ over the low-latency Entertainment API.
 
 The add-on has no options to set — everything is configured from its web UI. The bridge runs
 with **host networking** (required for SSDP/mDNS discovery and for the virtual bridge to appear
-on the LAN), so it binds host ports **80** (Hue API + web UI) and **443** (TLS listener for
-newer TVs). Make sure nothing else on the host already uses port 80.
+on the LAN), so it binds host port **80** (Hue API + web UI). Make sure nothing else on the host
+already uses port 80. (A TLS listener on 443 is available but off by default — the TVs use plain
+HTTP.)
 
 State (your bridge credentials and the rotating log) is stored in the add-on's persistent
 `/data`, so it survives restarts and updates.

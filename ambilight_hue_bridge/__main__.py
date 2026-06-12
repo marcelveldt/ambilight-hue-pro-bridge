@@ -62,8 +62,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=DEFAULT_HTTPS_PORT,
         help=(
-            f"TCP port for the TLS listener with a Hue-style cert (default: {DEFAULT_HTTPS_PORT}; "
-            "0 disables it). Newer Ambilight+Hue TVs discover via mDNS and connect over HTTPS."
+            "Optional TCP port for a TLS listener with a Hue-style cert "
+            f"(default: {DEFAULT_HTTPS_PORT} = off). The Ambilight+Hue TVs tested so far connect "
+            "over plain HTTP; set a port (e.g. 443) only if a client requires TLS."
         ),
     )
     parser.add_argument(

@@ -114,8 +114,8 @@ class BridgeApp:
         await web.TCPSite(runner, host="0.0.0.0", port=http_port).start()
         LOGGER.info("HTTP server (Hue API + web UI) listening on %s:%d", host_ip, http_port)
 
-        # The newer Hue/CLIP-v2 path connects over TLS; serve the same app on 443 with a
-        # Hue-style cert (harmless for the v1 TVs, ready for the very new sets).
+        # Optional TLS listener (off by default): the tested TVs connect over plain HTTP and
+        # never use the cert. Enable it (--https-port) only for a future CLIP-v2/TLS client.
         https_port = await self._start_https(runner, mac, host_ip)
 
         # Primary discovery is SSDP: the current Ambilight TVs find the bridge via SSDP
@@ -201,8 +201,8 @@ class BridgeApp:
             await site.start()
         except OSError as err:
             LOGGER.warning(
-                "Could not start HTTPS on port %d (%s) - continuing with HTTP only. Newer "
-                "Ambilight TVs may need HTTPS; run with privileges so port 443 can bind.",
+                "Could not start the optional HTTPS listener on port %d (%s) - continuing with "
+                "HTTP only (which the tested TVs use). Run with privileges if you need it to bind.",
                 self._https_port,
                 err,
             )

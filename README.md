@@ -144,14 +144,13 @@ Requires Python 3.13+.
 # create a virtualenv, install the package + dev deps, and set up pre-commit
 scripts/setup.sh
 
-# run the service — the Hue API and web UI share one port (--http-port, default 8080),
-# plus a TLS listener with a Hue-style cert (--https-port, default 443; 0 disables it).
+# run the service — the Hue API and web UI share one port (--http-port, default 8080).
 # Discovery (SSDP on UDP 1900 + mDNS _hue._tcp) runs alongside, always on.
 python -m ambilight_hue_bridge --log-level DEBUG
 
-# older Ambilight TVs assume the Hue API is on port 80; newer firmware connects over
-# HTTPS on 443. Serve both (binding 80/443 needs privileges):
-sudo ambilight-hue-bridge --http-port 80 --https-port 443 --log-level DEBUG
+# Ambilight TVs assume the Hue API is on port 80, so serve it there (binding 80 needs
+# privileges):
+sudo ambilight-hue-bridge --http-port 80 --log-level DEBUG
 
 # then open the web UI at http://<host>:<http-port> (e.g. http://<host>:8080) to pair
 # your Hue bridge (press the link button first). A freshly paired TV is auto-assigned your
@@ -159,7 +158,8 @@ sudo ambilight-hue-bridge --http-port 80 --https-port 443 --log-level DEBUG
 # `pair` / `areas` CLI is also available for headless setup.
 #
 # logs go to the console and a rotating file at <data-dir>/bridge.log (override with
-# --log-file); HTTPS is optional (--https-port 0) — discovery still works over mDNS + HTTP.
+# --log-file). A TLS listener is off by default; the tested TVs use plain HTTP. Add
+# --https-port 443 only if a future client needs TLS (over mDNS + HTTPS).
 
 # run the checks
 pre-commit run --all-files
@@ -176,7 +176,8 @@ project follows the conventions of [aiohue](https://github.com/home-assistant-li
 Implemented and working end-to-end:
 
 - **Discovery** — SSDP/UPnP responder + descriptor and an mDNS `_hue._tcp` advertisement, so both
-  older (SSDP) and newer Android (mDNS) Ambilight TVs find the bridge. Optional HTTPS listener.
+  older (SSDP) and newer Android (mDNS) Ambilight TVs find the bridge. HTTPS listener off by
+  default (the tested TVs use plain HTTP); enable with `--https-port`.
 - **Virtual bridge** — the legacy Hue v1 REST API, pairing (with `generateclientkey`), and a local
   N-UPnP endpoint for other LAN clients.
 - **Streaming** — inbound DTLS server (UDP 2100) for newer TVs and the ~1 Hz REST path for older

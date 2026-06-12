@@ -18,10 +18,11 @@ LOG_FILENAME: Final = "bridge.log"
 # Ambilight+Hue TVs assume the Hue bridge is on port 80, so run with --http-port 80 for them.
 DEFAULT_HTTP_PORT: Final = 8080
 
-# HTTPS port serving the same app with a Hue-style self-signed certificate. Newer Hue clients
-# (incl. recent Ambilight+Hue TV firmware) discover via mDNS and connect over TLS, so a real
-# bridge advertises _hue._tcp on 443. Command-line only; 0 disables the HTTPS listener.
-DEFAULT_HTTPS_PORT: Final = 443
+# Optional HTTPS port serving the same app with a Hue-style self-signed certificate. Off by
+# default (0): every Ambilight+Hue TV tested so far connects over plain HTTP and never uses the
+# cert, and binding 443 needs privileges. Set a port (e.g. 443) to enable TLS for a future
+# client that requires it. Command-line only.
+DEFAULT_HTTPS_PORT: Final = 0
 
 # Filenames for the persisted bridge TLS certificate (generated once, then pinned by clients).
 CERT_FILENAME: Final = "bridge_cert.pem"

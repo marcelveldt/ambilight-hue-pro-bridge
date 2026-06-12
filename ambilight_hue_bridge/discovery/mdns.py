@@ -22,10 +22,11 @@ def build_service_info(*, host_ip: str, port: int, bridge_id: str) -> AsyncServi
 
     Mirrors a real BSB002 bridge: the TXT record carries ``bridgeid`` (the same value we
     advertise over SSDP and return from the v1 ``/config``) and ``modelid=BSB002``, and the
-    service points at the TLS port a real bridge serves the API on (443).
+    service points at the port the bridge serves the API on (the TLS port when HTTPS is enabled,
+    otherwise the HTTP port). The Ambilight TVs ignore the SRV port and use the v1 API on :80.
 
     :param host_ip: LAN IPv4 address clients connect to.
-    :param port: TCP port the HTTPS Hue API is served on.
+    :param port: TCP port clients connect to (the TLS port if HTTPS is enabled, else HTTP).
     :param bridge_id: The 16-hex Hue ``bridgeid`` (uppercase, as advertised over SSDP).
     """
     instance = f"Philips Hue - {bridge_id[-6:]}.{HUE_SERVICE_TYPE}"
@@ -40,14 +41,15 @@ def build_service_info(*, host_ip: str, port: int, bridge_id: str) -> AsyncServi
 
 
 class MDNSAdvertiser:
-    """Advertises the virtual bridge as a Hue bridge over mDNS (_hue._tcp on the TLS port)."""
+    """Advertises the virtual bridge as a Hue bridge over mDNS (_hue._tcp on its API port)."""
 
     def __init__(self, *, host_ip: str, port: int, bridge_id: str) -> None:
         """
         Initialize the advertiser (no socket until :meth:`start`).
 
         :param host_ip: LAN IPv4 address clients connect to.
-        :param port: TCP port the HTTPS Hue API is served on (real bridges use 443).
+        :param port: TCP port clients connect to (the TLS port if HTTPS is enabled, else HTTP;
+            real bridges use 443).
         :param bridge_id: The 16-hex Hue ``bridgeid`` published in the TXT record.
         """
         self._info = build_service_info(host_ip=host_ip, port=port, bridge_id=bridge_id)

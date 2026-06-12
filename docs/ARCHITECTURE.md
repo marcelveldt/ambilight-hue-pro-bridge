@@ -41,7 +41,7 @@ where we stream out with low latency.
 | Layer | Required? | Why |
 |---|---|---|
 | **SSDP/UPnP responder** (UDP 1900 + `/description.xml`) | **Mandatory, byte-faithful** | hass-emulated-hue #41: a v1+SSDP emulator was *not discovered* until its M-SEARCH reply was byte-compatible with a real 2015 bridge — correct `hue-bridgeid` (MAC with `FFFE` inserted, uppercase), `USN` matching the descriptor UDN `uuid:2f402f80-da50-11e1-9b23-<mac>`, `SERVER: …IpBridge/1.x`, the `uuid:` ST/USN variant, **plus periodic SSDP NOTIFY broadcasts**. A naive responder fails. |
-| **mDNS `_hue._tcp.local`** (`modelid`+`bridgeid` TXT) | **Implemented (additive to SSDP)** | `discovery/mdns.py`; gated on `enable_mdns` + a bound HTTPS port, points clients at the TLS port. The newer discovery path. |
+| **mDNS `_hue._tcp.local`** (`modelid`+`bridgeid` TXT) | **Implemented (additive to SSDP)** | `discovery/mdns.py`; gated on `enable_mdns`, points clients at the TLS port when HTTPS is enabled else the HTTP port. The newer discovery path. |
 | **v1 REST emulator** (`/api`, pairing, `/config`, `/capabilities`, lights, groups) | **Mandatory** | The universal control path. Must advertise `capabilities.streaming` so streaming-capable TVs engage. Light state fields (`hue/sat/bri/ct`) must be **strictly integer-typed** — TVs reject floats (#61). Also serves a local N-UPnP JSON (`/api/nupnp`, `/nupnp`) mirroring `discovery.meethue.com` for LAN clients like aiohue — the Ambilight TVs don't use it. |
 | **`generateclientkey` on pairing** | **Mandatory** | The v1 pairing contract returns a `clientkey` (32-char uppercase hex) when requested; newer TVs need it to open their inbound stream. |
 | **Inbound DTLS server on UDP 2100** | **Implemented, gated** | Supports 2019+ Android TVs that stream *into* us. Started at boot when `enable_inbound_dtls` is set (default on); not required for the older-TV target. |
@@ -214,7 +214,7 @@ virtual_bridge:
   name: "Ambilight Bridge"
   mac: null                          # null => auto-detect from the host; drives bridgeid/UDN/serial
   enable_inbound_dtls: true          # inbound DTLS server for 2019+ Android TVs (UDP 2100)
-  enable_mdns: true                  # advertise _hue._tcp via mDNS (when HTTPS is up)
+  enable_mdns: true                  # advertise _hue._tcp via mDNS (TLS port if HTTPS on, else HTTP)
   stream_rate_hz: 50                 # outbound frame rate to the real bridge (config-only, no UI)
 
 real_bridges:                        # one or more real Hue bridges (V2 square or Pro)
