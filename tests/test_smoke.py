@@ -22,18 +22,16 @@ def test_unset_flags_default_to_none() -> None:
     args = parse_args([])
     assert args.http_port is None
     assert args.https_port is None
-    assert args.ui_port is None
     assert args.log_level is None
 
 
 def test_resolved_defaults(tmp_path, monkeypatch) -> None:
     """With no flags, env, or options.json, settings fall back to the built-in defaults."""
-    for var in ("DATA_DIR", "HTTP_PORT", "UI_PORT", "HTTPS_PORT", "LOG_LEVEL", "LOG_FILE"):
+    for var in ("DATA_DIR", "HTTP_PORT", "HTTPS_PORT", "LOG_LEVEL", "LOG_FILE"):
         monkeypatch.delenv(var, raising=False)
     settings = _resolve_settings(parse_args(["--data-dir", str(tmp_path)]))
     assert settings.http_port == DEFAULT_HTTP_PORT
     assert settings.https_port == DEFAULT_HTTPS_PORT
-    assert settings.ui_port is None
     assert settings.log_level == "INFO"
 
 

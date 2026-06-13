@@ -130,8 +130,8 @@ docker run -d --name ambilight-hue-bridge \
 ```
 
 Configure it with environment variables (`-e NAME=value`): `HTTP_PORT` (default 80, the Hue API
-+ web UI), `UI_PORT` (serve the web UI on a separate port), `HTTPS_PORT` (TLS listener; 0 = off),
-`LOG_LEVEL` (`verbose`/`debug`/`info`/`warning`/`error`, default `info`), `LOG_FILE`, `DATA_DIR`.
++ web UI), `HTTPS_PORT` (TLS listener; 0 = off), `LOG_LEVEL`
+(`verbose`/`debug`/`info`/`warning`/`error`, default `info`), `LOG_FILE`, `DATA_DIR`.
 
 Then open the web UI at `http://<host>:80`. State (bridge credentials, log) lives in the
 `/data` volume.
@@ -148,11 +148,10 @@ Requires Python 3.13+.
 # create a virtualenv, install the package + dev deps, and set up pre-commit
 scripts/setup.sh
 
-# run the service — the Hue API and web UI share one port (--http-port, default 8080); pass
-# --ui-port to serve the web UI on its own port instead. Discovery (SSDP on UDP 1900 + mDNS
-# _hue._tcp) runs alongside, always on. Every flag also has an env var (HTTP_PORT, UI_PORT,
-# HTTPS_PORT, LOG_LEVEL, LOG_FILE, DATA_DIR); precedence is flag > add-on options.json > env >
-# built-in default.
+# run the service — the Hue API and web UI share one port (--http-port, default 8080).
+# Discovery (SSDP on UDP 1900 + mDNS _hue._tcp) runs alongside, always on. Every flag also has
+# an env var (HTTP_PORT, HTTPS_PORT, LOG_LEVEL, LOG_FILE, DATA_DIR); precedence is
+# flag > add-on options.json > env > built-in default.
 python -m ambilight_hue_bridge --log-level debug
 
 # Ambilight TVs assume the Hue API is on port 80, so serve it there (binding 80 needs

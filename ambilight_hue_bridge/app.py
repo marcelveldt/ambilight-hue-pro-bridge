@@ -83,21 +83,17 @@ class BridgeApp:
     inbound/outbound streaming.
     """
 
-    def __init__(
-        self, data_dir: Path, *, http_port: int, ui_port: int | None = None, https_port: int
-    ) -> None:
+    def __init__(self, data_dir: Path, *, http_port: int, https_port: int) -> None:
         """
         Initialize the application (no I/O until :meth:`run`).
 
         :param data_dir: Directory for persistent configuration and state.
-        :param http_port: TCP port for the Hue v1 API (and the web UI, unless ``ui_port`` is set).
-        :param ui_port: Optional separate port for the config web UI; ``None`` shares ``http_port``.
+        :param http_port: TCP port for the Hue v1 API and the web UI.
         :param https_port: TCP port for the TLS listener (0 disables HTTPS).
         """
         self._data_dir = data_dir
         self._store = ConfigStore(data_dir / CONFIG_FILENAME)
         self._http_port = http_port
-        self._ui_port = ui_port
         self._https_port = https_port
         self._shutdown = asyncio.Event()
         self._engine: Engine | None = None
@@ -105,8 +101,6 @@ class BridgeApp:
         self._ssdp: SSDPServer | None = None
         self._mdns: MDNSAdvertiser | None = None
         self._runner: web.AppRunner | None = None
-        self._ui_runner: web.AppRunner | None = None
-        self._ingress_runner: web.AppRunner | None = None
 
     async def run(self) -> None:
         """Start all services and run until :meth:`request_stop` (or cancellation)."""
@@ -145,35 +139,26 @@ class BridgeApp:
             http_port=http_port,
         )
 
-        # The TV-facing Hue v1 API/descriptor always listens on http_port (older TVs assume :80).
-        # By default the web UI is served on the same app (one port); when --ui-port is set it
-        # gets its own listener instead, leaving http_port API-only.
-        split_ui = bool(self._ui_port) and self._ui_port != http_port
-        api_app = web.Application(middlewares=[log_requests])
-        emulator.register(api_app)
-        if not split_ui:
-            web_server.register(api_app)
-        runner = web.AppRunner(api_app, access_log=None)
+        # One app serves the TV-facing Hue v1 API/descriptor and the web UI on http_port (older
+        # TVs assume the bridge is on :80). Extra listeners (HTTPS, HA ingress) are additional
+        # TCP sites on the SAME runner - aiohttp multiplexes them onto this one app, so there is
+        # no second Application/handler to maintain.
+        app = web.Application(middlewares=[log_requests])
+        emulator.register(app)
+        web_server.register(app)
+        runner = web.AppRunner(app, access_log=None)
         self._runner = runner
         await runner.setup()
         await web.TCPSite(runner, host="0.0.0.0", port=http_port).start()
-        LOGGER.info(
-            "HTTP server (%s) listening on %s:%d",
-            "Hue API" if split_ui else "Hue API + web UI",
-            host_ip,
-            http_port,
-        )
-
-        if split_ui:
-            await self._start_ui(web_server, host_ip)
+        LOGGER.info("HTTP server (Hue API + web UI) listening on %s:%d", host_ip, http_port)
 
         # Optional TLS listener (off by default): the tested TVs connect over plain HTTP and
         # never use the cert. Enable it (--https-port) only for a future CLIP-v2/TLS client.
         https_port = await self._start_https(runner, mac, host_ip)
 
-        # When running as a Home Assistant add-on, also serve the web UI on the Supervisor's
-        # ingress port so it appears in the HA sidebar (HA handles auth). No-op otherwise.
-        await self._start_ingress(web_server)
+        # As a Home Assistant add-on, also accept requests on the Supervisor's ingress port so the
+        # UI appears in the HA sidebar (HA handles auth). No-op outside the add-on.
+        await self._start_ingress(runner)
 
         # Primary discovery is SSDP: the current Ambilight TVs find the bridge via SSDP
         # M-SEARCH + the UPnP descriptor on HTTP. mDNS is added below as belt-and-suspenders.
@@ -224,13 +209,8 @@ class BridgeApp:
         if self._ssdp is not None:
             await self._ssdp.stop()
             self._ssdp = None
-        if self._ingress_runner is not None:
-            await self._ingress_runner.cleanup()
-            self._ingress_runner = None
-        if self._ui_runner is not None:
-            await self._ui_runner.cleanup()
-            self._ui_runner = None
         if self._runner is not None:
+            # Cleaning up the runner stops all its sites (HTTP, HTTPS, and the ingress site).
             await self._runner.cleanup()
             self._runner = None
 
@@ -277,46 +257,22 @@ class BridgeApp:
         )
         return self._https_port
 
-    async def _start_ingress(self, web_server: WebServer) -> None:
+    async def _start_ingress(self, runner: web.AppRunner) -> None:
         """
-        Serve the web UI on the Home Assistant ingress port, when running as an add-on.
+        Accept requests on the Home Assistant ingress port, when running as an add-on.
 
-        A separate, UI-only listener (no TV-facing Hue API) bound to the Supervisor-assigned
-        ingress port; the UI rewrites its <base> from the ``X-Ingress-Path`` header so it works
-        behind the HA proxy. A no-op outside the add-on (no ``SUPERVISOR_TOKEN``).
+        Adds another TCP site to the shared runner (no second app), so the existing UI is reachable
+        through the HA proxy; the index rewrites its <base> from the ``X-Ingress-Path`` header. A
+        no-op outside the add-on (no ``SUPERVISOR_TOKEN``).
 
-        :param web_server: The web server whose UI routes are mounted on the ingress listener.
+        :param runner: The shared aiohttp runner the ingress site is attached to.
         """
         port = await _supervisor_ingress_port()
         if not port:
             return
-        app = web.Application(middlewares=[log_requests])
-        web_server.register(app)
-        runner = web.AppRunner(app, access_log=None)
-        await runner.setup()
         try:
             await web.TCPSite(runner, host="0.0.0.0", port=port).start()
         except OSError as err:
-            LOGGER.warning("Could not start the ingress UI listener on port %d: %s", port, err)
-            await runner.cleanup()
+            LOGGER.warning("Could not start the ingress listener on port %d: %s", port, err)
             return
-        self._ingress_runner = runner
-        LOGGER.info("Ingress UI listening on port %d (Home Assistant sidebar)", port)
-
-    async def _start_ui(self, web_server: WebServer, host_ip: str) -> None:
-        """Serve the config web UI on its own port (when --ui-port splits it off the API)."""
-        if self._ui_port is None:
-            return
-        app = web.Application(middlewares=[log_requests])
-        web_server.register(app)
-        runner = web.AppRunner(app, access_log=None)
-        await runner.setup()
-        try:
-            await web.TCPSite(runner, host="0.0.0.0", port=self._ui_port).start()
-        except OSError as err:
-            # An opt-in UI port conflict must not be fatal to the already-bound Hue API.
-            LOGGER.warning("Could not start the web UI on port %d: %s", self._ui_port, err)
-            await runner.cleanup()
-            return
-        self._ui_runner = runner
-        LOGGER.info("Web UI listening on %s:%d", host_ip, self._ui_port)
+        LOGGER.info("Ingress listening on port %d (Home Assistant sidebar)", port)

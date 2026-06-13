@@ -7,7 +7,7 @@ ARG VERSION=0.0.0
 
 # Container defaults, overridable with `docker run -e ...`. HTTP_PORT defaults to 80 because the
 # Ambilight TVs assume the Hue bridge is there; the Home Assistant add-on overrides these from its
-# options. Also settable: HTTPS_PORT, UI_PORT, LOG_LEVEL, LOG_FILE.
+# options. Also settable: HTTPS_PORT, LOG_LEVEL, LOG_FILE.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HTTP_PORT=80 \

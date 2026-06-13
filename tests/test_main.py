@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
     from ambilight_hue_bridge.__main__ import _Settings
 
-_ENV_VARS = ("DATA_DIR", "HTTP_PORT", "UI_PORT", "HTTPS_PORT", "LOG_LEVEL", "LOG_FILE")
+_ENV_VARS = ("DATA_DIR", "HTTP_PORT", "HTTPS_PORT", "LOG_LEVEL", "LOG_FILE")
 
 
 @pytest.fixture(autouse=True)
@@ -45,11 +45,9 @@ def test_verbose_level_registered() -> None:
 def test_env_vars_apply(tmp_path: Path, monkeypatch) -> None:
     """Env vars fill in settings when no flag/option is given."""
     monkeypatch.setenv("HTTP_PORT", "9001")
-    monkeypatch.setenv("UI_PORT", "9002")
     monkeypatch.setenv("LOG_LEVEL", "verbose")
     settings = _settings(tmp_path, [])
     assert settings.http_port == 9001
-    assert settings.ui_port == 9002
     assert settings.log_level == "VERBOSE"
 
 

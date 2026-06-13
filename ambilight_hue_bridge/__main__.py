@@ -43,7 +43,6 @@ class _Settings:
 
     data_dir: Path
     http_port: int
-    ui_port: int | None
     https_port: int
     log_level: str
     log_file: Path
@@ -79,18 +78,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            f"TCP port for the Hue API (env HTTP_PORT; default {DEFAULT_HTTP_PORT}). Use 80 for "
-            "older Ambilight+Hue TVs, which assume the bridge is on port 80. Also serves the web "
-            "UI unless --ui-port is set."
-        ),
-    )
-    parser.add_argument(
-        "--ui-port",
-        type=int,
-        default=None,
-        help=(
-            "Optional separate TCP port for the config web UI (env UI_PORT). Defaults to sharing "
-            "--http-port. As a Home Assistant add-on the UI is also served over ingress."
+            f"TCP port for the Hue API + web UI (env HTTP_PORT; default {DEFAULT_HTTP_PORT}). Use "
+            "80 for older Ambilight+Hue TVs, which assume the bridge is on port 80."
         ),
     )
     parser.add_argument(
@@ -211,7 +200,6 @@ def _resolve_settings(args: argparse.Namespace) -> _Settings:
     return _Settings(
         data_dir=data_dir,
         http_port=DEFAULT_HTTP_PORT if http_port is None else http_port,
-        ui_port=_resolve_port(args.ui_port, options.get("ui_port"), "UI_PORT"),
         https_port=_resolve_https_port(args, options),
         log_level=_resolve_log_level(args, options),
         log_file=args.log_file or _path(_env("LOG_FILE")) or (data_dir / LOG_FILENAME),
@@ -259,7 +247,6 @@ async def _serve(settings: _Settings) -> None:
     app = BridgeApp(
         settings.data_dir,
         http_port=settings.http_port,
-        ui_port=settings.ui_port,
         https_port=settings.https_port,
     )
     loop = asyncio.get_running_loop()
