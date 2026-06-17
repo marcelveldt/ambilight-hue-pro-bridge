@@ -23,6 +23,15 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 IDLE_TIMEOUT_S = 10.0
+# Outbound liveness: a one-way DTLS stream can't tell when the bridge silently ends the session
+# (a Pro reboot, an entertainment timeout, or another controller taking over) - sends keep
+# "succeeding" into the void. So poll the bridge's view of our area; if it is no longer ours for
+# this many consecutive polls, tear the stream down so the next inbound frame re-establishes it.
+_HEALTH_POLL_S = 5.0
+_HEALTH_FAILS_TO_RECOVER = 2
+# After another controller takes the area over, wait this long before re-grabbing it, so we don't
+# fight a deliberate Hue-app / Sync-box stream on every frame.
+_FOREIGN_BACKOFF_S = 60.0
 # Identify ("blink this light", from the TV's Hue alert during setup): flash full white on/off
 # over the stream for a short window ("select") or a longer one ("lselect").
 _IDENTIFY_SELECT_S = 2.0
@@ -51,8 +60,21 @@ class Engine:
         self._smoothed_buffer = ColorBuffer()
         self._session: EntertainmentSession | None = None
         self._ticker: asyncio.Task[None] | None = None
+        self._health_task: asyncio.Task[None] | None = None
         self._start_task: asyncio.Task[None] | None = None
         self._last_update = 0.0
+        # active_streamer rid the bridge reports for us, captured (once, positively) the first
+        # time the bridge names our streamer, so the health monitor can tell our own stream from
+        # a foreign takeover. The boolean distinguishes "captured" from the transient empty rid
+        # the bridge returns before it has named our streamer.
+        self._our_streamer_rid = ""
+        self._streamer_rid_captured = False
+        # Monotonic time before which a new stream won't be opened (set when another controller
+        # took the area over, so we back off rather than fight it).
+        self._regrab_block_until = 0.0
+        # Set by the health monitor when the bridge has ended our stream; the ticker watches it
+        # and tears down (keeping teardown a single-owner path).
+        self._remote_dead = False
         # Username (paired TV) that owns the active outbound stream, for the web UI + the
         # single-stream guard. Cleared on teardown.
         self._stream_owner: str | None = None
@@ -102,22 +124,26 @@ class Engine:
         if not self._logged_submit:
             self._logged_submit = True
             LOGGER.info("First inbound color submitted: light=%s rgb=%s", light_id, rgb)
-        if not self.is_streaming and self._start_task is None:
-            if self._can_stream():
-                self._start_task = asyncio.create_task(self._start_stream())
-            elif not self._logged_no_stream:
-                self._logged_no_stream = True
-                bridge = active_bridge(self._store)
-                area, lights = tv_stream_target(self._store, self._stream_owner)
-                LOGGER.warning(
-                    "Not starting outbound stream: owner=%s bridge=%s client_key=%s "
-                    "area=%r lights=%d (assign this TV an entertainment area in the web UI)",
-                    self._stream_owner,
-                    bridge.id if bridge else None,
-                    bool(bridge and bridge.client_key),
-                    area,
-                    len(lights),
-                )
+        if self._may_start():
+            self._start_task = asyncio.create_task(self._start_stream())
+        elif (
+            not self.is_streaming
+            and self._start_task is None
+            and not self._logged_no_stream
+            and time.monotonic() >= self._regrab_block_until
+        ):
+            self._logged_no_stream = True
+            bridge = active_bridge(self._store)
+            area, lights = tv_stream_target(self._store, self._stream_owner)
+            LOGGER.warning(
+                "Not starting outbound stream: owner=%s bridge=%s client_key=%s "
+                "area=%r lights=%d (assign this TV an entertainment area in the web UI)",
+                self._stream_owner,
+                bridge.id if bridge else None,
+                bool(bridge and bridge.client_key),
+                area,
+                len(lights),
+            )
 
     def start_stream(self, owner: str) -> None:
         """
@@ -130,7 +156,7 @@ class Engine:
         """
         self._last_update = time.monotonic()
         self._stream_owner = owner
-        if not self.is_streaming and self._start_task is None and self._can_stream():
+        if self._may_start():
             self._start_task = asyncio.create_task(self._start_stream())
 
     async def stop_stream(self) -> None:
@@ -154,7 +180,7 @@ class Engine:
         )
         if owner and self._stream_owner is None:
             self._stream_owner = owner
-        if not self.is_streaming and self._start_task is None and self._can_stream():
+        if self._may_start():
             self._start_task = asyncio.create_task(self._start_stream())
 
     def stop_identify(self, light_id: str) -> None:
@@ -180,6 +206,15 @@ class Engine:
             return False
         area, _ = tv_stream_target(self._store, self._stream_owner)
         return bool(area)
+
+    def _may_start(self) -> bool:
+        """Whether a new outbound stream may be opened now (idle, allowed, not backing off)."""
+        return (
+            not self.is_streaming
+            and self._start_task is None
+            and time.monotonic() >= self._regrab_block_until
+            and self._can_stream()
+        )
 
     def _apply_smoothing(self, lights: list[VirtualLight]) -> None:
         """
@@ -264,8 +299,19 @@ class Engine:
                 return
             self._session = session
             self._stream_lights = lights
+            self._remote_dead = False
+            self._our_streamer_rid = ""
+            self._streamer_rid_captured = False
             self._ticker = asyncio.create_task(self._run_ticker())
+            self._health_task = asyncio.create_task(self._run_health())
             LOGGER.info("Outbound stream started to %s area %s", bridge.host, area)
+        except asyncio.CancelledError:
+            # stop() cancelled us mid-connect. If the cancel landed after session.start() had
+            # already activated the area on the bridge (its pre-DTLS HTTP PUT), the session is
+            # orphaned here - close it so the area is deactivated and the HTTP session released.
+            with suppress(Exception):
+                await session.aclose()
+            raise
         except Exception:
             LOGGER.exception("Failed to start outbound stream to %s area %s", bridge.host, area)
             with suppress(Exception):
@@ -277,7 +323,7 @@ class Engine:
         """Send the buffered colors to the bridge at a fixed rate until inactivity."""
         try:
             while time.monotonic() - self._last_update < IDLE_TIMEOUT_S:
-                if self._session is None or not self._session.is_streaming:
+                if self._remote_dead or self._session is None or not self._session.is_streaming:
                     break
                 self._apply_smoothing(self._stream_lights)
                 self._apply_identify()
@@ -302,21 +348,88 @@ class Engine:
             await self._teardown()
             LOGGER.info("Outbound stream stopped")
 
+    async def _run_health(self) -> None:
+        """
+        Poll the bridge's view of our stream and flag it dead if the bridge silently ended it.
+
+        The bridge can drop our session (a Pro reboot, an entertainment timeout, another
+        controller taking over) without our one-way DTLS sender noticing. This polls the bridge's
+        entertainment status and, on a confirmed loss, sets the flag the ticker watches so the
+        stream tears down and re-establishes on the next inbound frame.
+        """
+        if self._session is not None and not hasattr(self._session, "remote_status"):
+            LOGGER.warning(
+                "Installed hue-entertainment has no remote_status(); skipping stream health "
+                "checks - update the library to enable silent-drop recovery",
+            )
+            return
+        fails = 0
+        while True:
+            await asyncio.sleep(_HEALTH_POLL_S)
+            session = self._session
+            if session is None or not session.is_streaming or self._remote_dead:
+                return
+            try:
+                status, rid = await session.remote_status()
+            except Exception as err:  # noqa: BLE001 - a transient API error is not a stream loss
+                LOGGER.debug("Stream health check failed (%s); ignoring", err)
+                continue
+            if status == "active" and rid and not self._streamer_rid_captured:
+                # First time the bridge names our streamer: that rid is us. (A non-empty rid is
+                # required, so the transient empty rid right after start isn't mistaken for us.)
+                self._our_streamer_rid = rid
+                self._streamer_rid_captured = True
+            # Before our streamer is named, trust status alone (startup grace); after, the rid
+            # must match us - a cleared rid then means the bridge dropped us, not that we're fine.
+            ours = status == "active" and (
+                rid == self._our_streamer_rid if self._streamer_rid_captured else True
+            )
+            if ours:
+                fails = 0
+                continue
+            fails += 1
+            if fails < _HEALTH_FAILS_TO_RECOVER:
+                continue
+            if status == "active" and rid and rid != self._our_streamer_rid:
+                # A different controller owns the area now - back off, don't fight it.
+                self._regrab_block_until = time.monotonic() + _FOREIGN_BACKOFF_S
+                LOGGER.warning(
+                    "Bridge entertainment taken over by another streamer; backing off %.0fs",
+                    _FOREIGN_BACKOFF_S,
+                )
+            else:
+                LOGGER.warning(
+                    "Bridge ended the entertainment session (status=%r); tearing down to recover",
+                    status or "unknown",
+                )
+            self._remote_dead = True
+            return
+
     async def _teardown(self) -> None:
-        """Stop the ticker and close the entertainment session."""
+        """Stop the ticker, the health monitor, and close the entertainment session."""
         ticker = self._ticker
         self._ticker = None
         if ticker is not None and ticker is not asyncio.current_task():
             ticker.cancel()
             with suppress(asyncio.CancelledError):
                 await ticker
+        health = self._health_task
+        self._health_task = None
+        if health is not None and health is not asyncio.current_task():
+            health.cancel()
+            with suppress(asyncio.CancelledError):
+                await health
         session = self._session
         self._session = None
         self._stream_owner = None
         self._stream_lights = []
         self._smoothed_float.clear()
         self._identify.clear()
-        # Reset the per-stream one-shot diagnostics so the next stream logs its own first frame.
+        # Reset per-stream state so the next stream starts clean. The re-grab backoff persists
+        # (it intentionally outlives the torn-down session it was set for).
+        self._remote_dead = False
+        self._our_streamer_rid = ""
+        self._streamer_rid_captured = False
         self._logged_tick = False
         self._logged_empty = False
         self._logged_no_stream = False

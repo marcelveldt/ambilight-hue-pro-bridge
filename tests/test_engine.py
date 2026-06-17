@@ -56,6 +56,8 @@ class _FakeSession:
         self.idle_timeout = idle_timeout
         self.connected = False
         self.frames: list[object] = []
+        # Bridge-reported (status, active_streamer_rid) for the health monitor; healthy + ours.
+        self.status: tuple[str, str] = ("active", "us")
 
     @property
     def is_streaming(self) -> bool:
@@ -70,6 +72,10 @@ class _FakeSession:
     def send(self, commands: object) -> None:
         """Record a frame."""
         self.frames.append(commands)
+
+    async def remote_status(self) -> tuple[str, str]:
+        """Return the bridge's view of the stream (drives the engine health monitor)."""
+        return self.status
 
     async def aclose(self) -> None:
         """Mark the stream stopped."""
@@ -305,3 +311,104 @@ async def test_start_stream_sets_owner_then_clears_on_stop(tmp_path: Path, monke
     assert await _wait_until(lambda: engine.is_streaming)
     await engine.stop()
     assert engine.stream_owner is None
+
+
+async def test_health_recovers_on_silent_bridge_drop(tmp_path: Path, monkeypatch) -> None:
+    """When the bridge silently ends the session, the health monitor tears the stream down."""
+    created: list[_FakeSession] = []
+
+    def factory(*args: object, **kwargs: object) -> _FakeSession:
+        session = _FakeSession(*args, **kwargs)  # type: ignore[arg-type]
+        created.append(session)
+        return session
+
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine._HEALTH_POLL_S", 0.02)
+
+    engine = Engine(_configured_store(tmp_path), rate_hz=100)
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    assert await _wait_until(lambda: engine.is_streaming)
+    # The bridge silently ends the session (status goes inactive) - sends would keep "succeeding".
+    created[0].status = ("inactive", "")
+    assert await _wait_until(lambda: not engine.is_streaming)
+    # No re-grab backoff for a plain drop, so the next frame re-establishes it.
+    assert engine._regrab_block_until == 0.0
+    await engine.stop()
+
+
+async def test_health_backs_off_on_takeover(tmp_path: Path, monkeypatch) -> None:
+    """A foreign controller taking the area over makes the engine back off, not fight it."""
+    created: list[_FakeSession] = []
+
+    def factory(*args: object, **kwargs: object) -> _FakeSession:
+        session = _FakeSession(*args, **kwargs)  # type: ignore[arg-type]
+        created.append(session)
+        return session
+
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine._HEALTH_POLL_S", 0.02)
+
+    engine = Engine(_configured_store(tmp_path), rate_hz=100)
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    assert await _wait_until(lambda: engine.is_streaming)
+    # Let the first poll capture our own streamer id before a different controller appears.
+    assert await _wait_until(lambda: engine._our_streamer_rid == "us")
+    created[0].status = ("active", "other-app")
+    assert await _wait_until(lambda: not engine.is_streaming)
+    assert engine._regrab_block_until > time.monotonic()
+    # Within the backoff window a new frame must NOT re-grab the stream.
+    engine.submit_color("tv1", "1", (0, 65535, 0))
+    assert not await _wait_until(lambda: engine.is_streaming, max_wait=0.2)
+    await engine.stop()
+
+
+async def test_health_recovers_when_streamer_cleared(tmp_path: Path, monkeypatch) -> None:
+    """Status stays 'active' but the bridge clears our streamer (rid '') - treated as a drop."""
+    created: list[_FakeSession] = []
+
+    def factory(*args: object, **kwargs: object) -> _FakeSession:
+        session = _FakeSession(*args, **kwargs)  # type: ignore[arg-type]
+        created.append(session)
+        return session
+
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine._HEALTH_POLL_S", 0.02)
+
+    engine = Engine(_configured_store(tmp_path), rate_hz=100)
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    assert await _wait_until(lambda: engine.is_streaming)
+    assert await _wait_until(lambda: engine._our_streamer_rid == "us")
+    # Bridge keeps the config active but no longer names a streamer: our stream was dropped.
+    created[0].status = ("active", "")
+    assert await _wait_until(lambda: not engine.is_streaming)
+    assert engine._regrab_block_until == 0.0  # a drop, not a takeover - re-grab is allowed
+    await engine.stop()
+
+
+async def test_stop_during_cancellable_connect_closes_session(tmp_path: Path, monkeypatch) -> None:
+    """A stop whose cancel lands on a cancellable await in start() still closes the session."""
+    gate = asyncio.Event()
+    closed: list[bool] = []
+
+    class _PropagatingSession(_FakeSession):
+        """Models the real lib activating the area on a pre-DTLS await, then propagating cancel."""
+
+        async def start(self, area_id: str) -> None:
+            assert area_id
+            await gate.wait()  # cancellable; on stop() the CancelledError propagates out
+            self.connected = True
+
+        async def aclose(self) -> None:
+            await super().aclose()
+            closed.append(True)
+
+    def factory(*args: object, **kwargs: object) -> _PropagatingSession:
+        return _PropagatingSession(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    engine = Engine(_configured_store(tmp_path))
+    engine.start_stream("tv1")
+    await asyncio.sleep(0.02)  # let _start_stream block in session.start
+    await engine.stop()
+    assert not engine.is_streaming
+    assert closed  # the orphaned mid-connect session was closed, not leaked
