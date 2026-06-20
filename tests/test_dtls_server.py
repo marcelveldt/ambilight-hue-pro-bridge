@@ -18,6 +18,40 @@ _CLIENT_KEY = "00112233445566778899AABBCCDDEEFF"
 _USERNAME = "test-user"
 
 
+def test_inbound_recv_error_keeps_listening(monkeypatch) -> None:
+    """A transient socket error logs and keeps the receive thread alive (it must not break out)."""
+    monkeypatch.setattr("ambilight_hue_bridge.emulator.dtls_server._ERROR_BACKOFF_S", 0.0)
+    loop = asyncio.new_event_loop()
+    server = HueDtlsServer(
+        psk_provider=lambda _identity: None,
+        on_frame=lambda _identity, _data: None,
+        loop=loop,
+        port=0,
+    )
+    calls = {"n": 0}
+
+    class _FlakySock:
+        def recvfrom(self, _size: int) -> tuple[bytes, tuple[str, int]]:
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise OSError("connection refused")  # transient ICMP-style error
+            server._running = False  # let the loop exit cleanly on the next guard check
+            raise TimeoutError
+
+        def close(self) -> None:
+            """No-op close for the injected socket."""
+
+    server._sock = _FlakySock()  # type: ignore[assignment]
+    server._running = True
+    try:
+        server._run()  # returns only because the flaky socket flips _running on the 3rd call
+    finally:
+        loop.close()
+    # Without the fix the first OSError would break out after a single recvfrom; with it the
+    # thread rides through both transient errors and keeps listening.
+    assert calls["n"] == 3
+
+
 async def test_server_handshakes_with_lib_client() -> None:
     """The lib client pairs with the server and a sent frame is decrypted and decoded."""
     loop = asyncio.get_running_loop()

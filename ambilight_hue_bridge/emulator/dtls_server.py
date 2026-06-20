@@ -52,6 +52,9 @@ _RANDOM_LEN = 32
 _VERIFY_DATA_LEN = 12
 _COOKIE_LEN = 16
 _SOCKET_TIMEOUT = 0.5
+# Pause after an unexpected socket error before retrying, so a persistent error can't spin the
+# receive thread in a hot loop (while still keeping the listener alive across transient ones).
+_ERROR_BACKOFF_S = 1.0
 
 
 class HueDtlsServer:
@@ -124,8 +127,15 @@ class HueDtlsServer:
                 data, addr = sock.recvfrom(4096)
             except TimeoutError:
                 continue
-            except OSError:
-                break
+            except OSError as err:
+                if not self._running:
+                    break  # socket closed by stop() - expected shutdown
+                # A transient socket error (e.g. an ICMP ECONNREFUSED after a peer blip, or an
+                # interface flap) must NOT kill the listener for the rest of the process life -
+                # that silently breaks all entertainment reception while the web UI keeps working.
+                LOGGER.warning("Inbound DTLS socket error: %s; continuing to listen", err)
+                time.sleep(_ERROR_BACKOFF_S)
+                continue
             try:
                 self._handle_datagram(data, addr)
             except Exception:  # noqa: BLE001 - never let a malformed datagram kill the thread
