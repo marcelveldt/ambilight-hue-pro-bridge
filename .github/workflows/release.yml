@@ -15,12 +15,24 @@ jobs:
       contents: read
       packages: write
     steps:
-      - name: Check out code from GitHub
-        uses: actions/checkout@v6
-
-      - name: Resolve version from the release tag
+      - name: Resolve version from the release
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          # Use the release payload's tag (authoritative; survives re-runs) rather than
+          # GITHUB_REF_NAME, which can be a branch on a re-run and yield an empty version.
+          version="${TAG#v}"
+          if [ -z "$version" ]; then
+            echo "::error::Could not resolve a release version from the event tag '${TAG}'"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the released tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -40,9 +52,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Tag from the resolved version (not github.ref, which isn't reliably the tag here) so
+          # the image gets both :<version> (the add-on pins this) and :latest.
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ steps.version.outputs.version }}
             type=raw,value=latest
 
       - name: Build and push the multi-arch image
@@ -68,18 +81,17 @@ jobs:
           ref: main
 
       - name: Point the Home Assistant add-on at the released image
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          sed -i "s/^version: .*/version: \"${version}\"/" addon/config.yaml
-
-      - name: Commit and push the bump
-        run: |
+          version="${TAG#v}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          sed -i "s/^version: .*/version: \"${version}\"/" addon/config.yaml
           git add addon/config.yaml
           if git diff --staged --quiet; then
             echo "Add-on version already current; nothing to commit."
           else
-            git commit -m "Bump Home Assistant add-on to ${GITHUB_REF_NAME#v}"
+            git commit -m "Bump Home Assistant add-on to ${version}"
             git push origin HEAD:main
           fi

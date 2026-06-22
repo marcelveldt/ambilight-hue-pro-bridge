@@ -18,7 +18,10 @@ COPY . /app
 
 # Stamp the release version into the package metadata, then install. cryptography/aiohttp ship
 # wheels for the targeted arches (amd64/arm64), so no compiler toolchain is needed here.
-RUN sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml \
+# Fall back to 0.0.0 if VERSION is empty/unset so an empty build-arg can't write an invalid
+# (non-PEP440) `version = ""` that fails the build.
+RUN version="${VERSION:-0.0.0}" \
+    && sed -i "s/^version = .*/version = \"${version}\"/" pyproject.toml \
     && pip install --no-cache-dir . \
     && rm -rf /root/.cache
 
