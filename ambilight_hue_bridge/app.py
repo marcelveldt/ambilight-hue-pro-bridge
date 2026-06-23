@@ -35,6 +35,27 @@ _SUPERVISOR_INFO_URL = "http://supervisor/addons/self/info"
 _SUPERVISOR_TIMEOUT = 10.0
 
 
+def resolve_mac(store: ConfigStore) -> str:
+    """
+    Return the bridge MAC, detecting and persisting it on first run for a stable identity.
+
+    The bridge id / serial / UPnP UDN all derive from this MAC, so it must stay constant across
+    restarts or a paired TV stops recognizing the bridge. ``uuid.getnode()`` returns a fresh
+    random value each process start when no hardware MAC is available (common in containers), so
+    the detected value is written to config once and reused thereafter.
+
+    :param store: Config store providing (and persisting) the virtual bridge MAC.
+    """
+    mac = store.config.virtual_bridge.mac
+    if mac:
+        return mac
+    mac = get_host_mac()
+    store.config.virtual_bridge.mac = mac
+    store.save()
+    LOGGER.info("Locked bridge identity to MAC %s (bridge id %s)", mac, bridge_id(mac))
+    return mac
+
+
 def get_host_ip() -> str:
     """Return the host's primary LAN IPv4 address (falls back to loopback)."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -116,7 +137,7 @@ class BridgeApp:
         self._store.load()
         config = self._store.config
         http_port = self._http_port
-        mac = config.virtual_bridge.mac or get_host_mac()
+        mac = resolve_mac(self._store)
         host_ip = get_host_ip()
 
         engine = Engine(self._store)
