@@ -17,8 +17,9 @@ dependencies = [
   "pyyaml>=6.0",
   # Outbound Hue Entertainment streaming client (DTLS/PSK + HueStream), shared with
   # Music Assistant. During local development it is installed editable from the sibling
-  # checkout (see scripts/setup.sh); CI/users get it from PyPI.
-  "hue-entertainment",
+  # checkout (see scripts/setup.sh); CI/users get it from PyPI. >=0.1.2 for remote_status(),
+  # which the engine's outbound-stream health monitor needs (older versions disable it).
+  "hue-entertainment>=0.1.2",
   # Hue-style self-signed TLS cert for the HTTPS listener (newer TVs connect over TLS).
   "cryptography>=42",
   # mDNS/DNS-SD advertisement of _hue._tcp so newer Hue clients can also discover us.
