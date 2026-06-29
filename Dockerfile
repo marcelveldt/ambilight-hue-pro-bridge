@@ -13,6 +13,13 @@ ENV PYTHONUNBUFFERED=1 \
     HTTP_PORT=80 \
     LOG_LEVEL=info
 
+# python:3.13-slim ships without the system timezone database, so the TZ env var Home Assistant
+# sets for add-ons can't be resolved and log timestamps fall back to UTC. Install tzdata so they
+# render in local time. (Plain Docker users: pass -e TZ=Region/City.)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY . /app
 
