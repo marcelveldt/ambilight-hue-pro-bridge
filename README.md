@@ -58,45 +58,34 @@ Pair your real Hue bridge in the web UI first, then run the **Ambilight+Hue** se
 
 ### The two-bridge catch (important)
 
-The real Hue bridge this app streams to is itself a Hue bridge on your LAN — it advertises
-`_hue._tcp` over **mDNS** exactly like this virtual one. Newer Ambilight TVs discover Hue over that
-local mDNS, so the TV can find the *real* bridge and connect to it instead of this app. Since the
-Hue Bridge Pro dropped Ambilight+Hue support, it then sits there doing nothing.
+Your real Hue bridge advertises `_hue._tcp` over **mDNS** exactly like this virtual one, so a newer
+Ambilight TV can discover the *real* bridge and connect to it instead. Since the Hue Bridge Pro
+dropped Ambilight+Hue support, the TV then sits there doing nothing.
 
-A TV is *sticky* once it locks to a bridge, but it re-discovers whenever it loses that bridge —
-e.g. when this virtual bridge briefly restarts (add-on updates, reboots, network blips). If the
-real bridge is reachable in that window, the TV can latch back onto it and stay stuck. This is a
-purely **local** discovery collision — the TV finds the real bridge on your own network via mDNS,
-*not* through Philips' cloud — so blocking `discovery.meethue.com` does **not** help. (It isn't
-unique to this project; diyHue/emulated_hue users hit the same thing.)
+A TV is *sticky* once locked to a bridge, but re-discovers whenever it loses it — e.g. when this
+virtual bridge briefly restarts (updates, reboots, network blips). If the real bridge is reachable
+then, the TV can latch onto it and stay stuck. The collision is purely **local** (mDNS on your own
+network, *not* Philips' cloud), so blocking `discovery.meethue.com` does **not** help.
+diyHue/emulated_hue users hit the same thing.
 
-**The durable fix: stop the TV from *discovering* the real bridge on the LAN, while this app can
-still reach it by IP** (the app only needs the bridge's address — it never relies on discovery).
-Isolate *either* side:
+**The durable fix: stop the TV from *discovering* the real bridge, while this app still reaches it
+by IP** (it only needs the address, never discovery). Isolate *either* side:
 
-- **Put the real bridge (or the TV) on its own VLAN / isolated subnet** that the app's host can
-  still route to. The app reaches the bridge by unicast; the TV never sees its mDNS. This is the
-  clean fix, but it needs a router that can do VLANs or wired/Wi-Fi client isolation. (A plain
-  guest network won't do — its isolation is symmetric, so it would also cut this app off from the
-  real bridge.)
-- **No VLAN-capable router (e.g. a FRITZ!Box)?** mDNS is link-local multicast between devices on the
-  same flat LAN, so it never traverses the router and there's nothing to filter — a DNS/domain
-  block can't touch it. Use the manual step below, and unplug the real bridge during add-on updates
-  so the TV can't grab it in the restart window.
+- **VLAN / isolated subnet** for the real bridge (or the TV) that the app's host can still route to
+  — the clean fix, if your router does VLANs or client isolation. (A guest network won't do: its
+  isolation is symmetric and would cut the app off from the bridge too.)
+- **No VLAN?** mDNS is link-local multicast on a flat LAN — it never reaches the router, so nothing
+  can filter it. Use the manual step below, and unplug the real bridge during updates.
 
 ### One-time setup / recovery
 
-Force the TV onto this bridge manually:
+Force the TV onto this bridge manually: **unplug the real bridge → power-cycle the TV** (clears its
+cached bridge) **→ run the Ambilight+Hue setup** (it now finds only this bridge and locks to it) **→
+plug the real bridge back in**. The TV is auto-assigned your first entertainment area — reassign it
+(or split its gradient strips) in the web UI.
 
-1. **Unplug the real Hue bridge.**
-2. **Power-cycle the TV** (clears its cached bridge).
-3. **Run the Ambilight+Hue setup on the TV** — it now finds only this virtual bridge and locks to it.
-4. **Plug the real bridge back in.** The TV is auto-assigned your first entertainment area, so its
-   lights light up straight away — reassign it (or split its gradient strips) in the web UI.
-
-Once locked, the TV keeps using this bridge with the real one back online — until *this* bridge
-restarts, which can send it drifting back. That's why isolating the bridges (above) is the real fix
-rather than a one-time step.
+Once locked, the TV keeps this bridge until *this* one restarts, which can send it drifting back —
+so isolating the bridges above is the real fix, not a one-time step.
 
 ## Features
 
