@@ -56,18 +56,47 @@ The app sits on your LAN between the TV and your real Hue bridge:
 
 Pair your real Hue bridge in the web UI first, then run the **Ambilight+Hue** setup on the TV.
 
-If you also have a **real Hue bridge on the network** (e.g. a Hue Pro), the TV may discover
-*that* instead of the virtual one — and because the Pro dropped Ambilight+Hue support, that path
-just fails. To force the TV onto the virtual bridge:
+### The two-bridge catch (important)
 
-1. **Unplug your real Hue bridge.**
-2. **Restart (power-cycle) the TV** — this clears its cached bridge.
-3. **Start the Ambilight+Hue setup wizard on the TV** — it now discovers the virtual bridge.
-4. Once paired, **plug the real bridge back in** (it's where the colours are streamed to). The
-   TV is auto-assigned your first entertainment area, so its lights light up straight away —
-   reassign it (or split its gradient strips) in the web UI if you want something different.
+The real Hue bridge this app streams to is itself a Hue bridge on your LAN — it advertises
+`_hue._tcp` over **mDNS** exactly like this virtual one. Newer Ambilight TVs discover Hue over that
+local mDNS, so the TV can find the *real* bridge and connect to it instead of this app. Since the
+Hue Bridge Pro dropped Ambilight+Hue support, it then sits there doing nothing.
 
-The bridge it's cached to sticks across reboots, so this is a one-time step per TV.
+A TV is *sticky* once it locks to a bridge, but it re-discovers whenever it loses that bridge —
+e.g. when this virtual bridge briefly restarts (add-on updates, reboots, network blips). If the
+real bridge is reachable in that window, the TV can latch back onto it and stay stuck. This is a
+purely **local** discovery collision — the TV finds the real bridge on your own network via mDNS,
+*not* through Philips' cloud — so blocking `discovery.meethue.com` does **not** help. (It isn't
+unique to this project; diyHue/emulated_hue users hit the same thing.)
+
+**The durable fix: stop the TV from *discovering* the real bridge on the LAN, while this app can
+still reach it by IP** (the app only needs the bridge's address — it never relies on discovery).
+Isolate *either* side:
+
+- **Put the real bridge (or the TV) on its own VLAN / isolated subnet** that the app's host can
+  still route to. The app reaches the bridge by unicast; the TV never sees its mDNS. This is the
+  clean fix, but it needs a router that can do VLANs or wired/Wi-Fi client isolation. (A plain
+  guest network won't do — its isolation is symmetric, so it would also cut this app off from the
+  real bridge.)
+- **No VLAN-capable router (e.g. a FRITZ!Box)?** mDNS is link-local multicast between devices on the
+  same flat LAN, so it never traverses the router and there's nothing to filter — a DNS/domain
+  block can't touch it. Use the manual step below, and unplug the real bridge during add-on updates
+  so the TV can't grab it in the restart window.
+
+### One-time setup / recovery
+
+Force the TV onto this bridge manually:
+
+1. **Unplug the real Hue bridge.**
+2. **Power-cycle the TV** (clears its cached bridge).
+3. **Run the Ambilight+Hue setup on the TV** — it now finds only this virtual bridge and locks to it.
+4. **Plug the real bridge back in.** The TV is auto-assigned your first entertainment area, so its
+   lights light up straight away — reassign it (or split its gradient strips) in the web UI.
+
+Once locked, the TV keeps using this bridge with the real one back online — until *this* bridge
+restarts, which can send it drifting back. That's why isolating the bridges (above) is the real fix
+rather than a one-time step.
 
 ## Features
 

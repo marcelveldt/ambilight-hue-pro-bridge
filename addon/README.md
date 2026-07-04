@@ -38,15 +38,26 @@ State (your bridge credentials and the rotating log) is stored in the add-on's p
 
 ## Connecting a TV
 
-If you also run a **real Hue bridge** on the network, the TV may discover *that* instead of the
-virtual one (and fail, since the Pro dropped Ambilight+Hue). To force the TV onto the virtual
-bridge the first time:
+Your real Hue bridge is also a Hue bridge on the LAN — it advertises `_hue._tcp` over **mDNS** just
+like this virtual one. Newer Ambilight TVs discover Hue over that local mDNS, so the TV can find the
+*real* bridge and connect to it instead — and since the Hue Bridge Pro dropped Ambilight+Hue
+support, it then sits there doing nothing. A TV is sticky once locked to a bridge but re-discovers
+whenever it loses it, so this can recur whenever the add-on restarts (updates/reboots) while the
+real bridge is reachable. This is a purely **local** collision — the TV finds the real bridge via
+mDNS on your own network, *not* through Philips' cloud — so blocking `discovery.meethue.com` does
+not help.
 
-1. Unplug your real Hue bridge.
-2. Power-cycle the TV (this clears its cached bridge).
-3. Start the Ambilight+Hue setup on the TV — it now finds the virtual bridge.
-4. Plug the real bridge back in. The TV is auto-assigned your first entertainment area; adjust
-   it (or split its gradient strips) in the web UI.
+**Durable fix:** stop the TV from *discovering* the real bridge on the LAN while the add-on still
+reaches it by IP. Put the real bridge (or the TV) on its own VLAN / isolated subnet the add-on's
+host can still route to — the clean fix, if your router can do VLANs or client isolation. (A guest
+network won't do: its isolation is symmetric and would also cut the add-on off from the real bridge.
+And on a flat LAN with no VLANs — e.g. a FRITZ!Box — mDNS is link-local multicast between devices,
+so it never reaches the router and there's nothing to filter; use the manual step below and unplug
+the real bridge during add-on updates.)
 
-See the [project README](https://github.com/marcelveldt/ambilight-hue-pro-bridge) for full
-details.
+**First-time setup / recovery:** unplug the real bridge → power-cycle the TV → run the Ambilight+Hue
+setup (it finds only this bridge and locks to it) → plug the real bridge back in. The TV is
+auto-assigned your first entertainment area; adjust it in the web UI.
+
+See the [project README](https://github.com/marcelveldt/ambilight-hue-pro-bridge) for the full
+explanation.
