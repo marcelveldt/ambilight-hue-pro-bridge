@@ -91,7 +91,8 @@ so isolating the bridges above is the real fix, not a one-time step.
 
 - 🪟 Web interface for configuration
 - 🧩 KISS, robust, low-resource always-on background service (cheap when idle)
-- 📺 Per-TV setup — assign each TV an entertainment area, with its own smoothing
+- 📺 Per-TV setup — area, smoothing, enabled state, and stream priority
+- 🔀 Priority arbitration — a higher-priority TV takes over the bridge's single streaming slot
 - 🌈 Map a gradient / multi-zone light into multiple addressable virtual lights
 - 📡 Discovered by both older (SSDP/UPnP) and newer (mDNS) Ambilight TVs
 - 🔌 Works with both the square Hue V2 bridge and the new Hue Pro bridge
@@ -134,6 +135,32 @@ https://github.com/marcelveldt/ambilight-hue-pro-bridge
 
 Then install **Ambilight+Hue Pro Bridge** and open its web UI — from the HA sidebar (ingress) or
 directly at `http://<ha-host>:80`. See [addon/README.md](addon/README.md) for details.
+
+### Per-TV control from Home Assistant
+
+Each TV card has an **enabled** toggle and a **stream priority** from 0 to 100. Higher values win;
+the current TV keeps the stream on a tie. A higher-priority request closes the current
+entertainment session before opening the new TV's area. A disabled TV stays connected to the
+virtual bridge but cannot stream to the real bridge; enabling it starts its pending request unless
+a higher-priority TV is active.
+
+The same settings have a LAN-local JSON API for a Home Assistant REST command or REST sensor:
+
+```bash
+# Find each paired TV's username and current settings.
+curl http://<bridge-host>:80/cfg/tvs
+
+# Read one TV (suitable for a REST sensor's value_json.enabled).
+curl http://<bridge-host>:80/cfg/tvs/<username>
+
+# Change either or both settings.
+curl -X PUT http://<bridge-host>:80/cfg/tvs/<username> \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled": false, "stream_priority": 25}'
+```
+
+The response is the updated TV object. The direct `/cfg` API has no separate authentication, like
+the web UI itself, so expose it only on the trusted LAN or through authenticated HA ingress.
 
 ### Docker
 
@@ -208,9 +235,9 @@ Implemented and working end-to-end:
 - **Streaming** — inbound DTLS server (UDP 2100) for newer TVs and the ~1 Hz REST path for older
   ones, forwarded on demand to a V2 or Pro bridge over the Entertainment API via the shared
   [music-assistant/hue-entertainment](https://github.com/music-assistant/hue-entertainment) client.
-- **Engine** — per-TV light/area mapping, gradient-zone split, per-TV temporal smoothing, light
-  identify (blink), and idle teardown.
-- **Web UI** — bridge pairing, per-TV area assignment + smoothing, and TV removal.
+- **Engine** — per-TV light/area mapping, gradient-zone split, per-TV temporal smoothing, priority
+  arbitration/preemption, enablement, light identify (blink), and idle teardown.
+- **Web UI** — bridge pairing, per-TV area assignment, smoothing, enablement/priority, and removal.
 - **Packaging** — a multi-arch (amd64/arm64) Docker image published to GHCR on every release,
   and a Home Assistant add-on wrapping it.
 

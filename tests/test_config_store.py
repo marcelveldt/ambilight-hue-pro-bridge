@@ -32,6 +32,8 @@ def test_save_and_reload_roundtrip(tmp_path: Path) -> None:
             clientkey="k",
             devicetype="TV",
             created="2026-06-10",
+            enabled=False,
+            stream_priority=42,
             entertainment_area="area-1",
             lights=[VirtualLight(id="7", name="Strip", position="behind")],
         ),
@@ -43,6 +45,26 @@ def test_save_and_reload_roundtrip(tmp_path: Path) -> None:
     config = reloaded.load()
     assert config.virtual_bridge.name == "Living Room Bridge"
     assert len(config.users) == 1
+    assert config.users[0].enabled is False
+    assert config.users[0].stream_priority == 42
     assert config.users[0].entertainment_area == "area-1"
     assert config.users[0].lights[0].id == "7"
     assert config.users[0].lights[0].position == "behind"
+
+
+def test_load_old_tv_config_uses_policy_defaults(tmp_path: Path) -> None:
+    """Existing configs without policy fields keep TVs enabled at equal priority."""
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+users:
+  - username: u1
+    clientkey: k
+    devicetype: TV
+    created: "2026-06-10"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    config = ConfigStore(path).load()
+    assert config.users[0].enabled is True
+    assert config.users[0].stream_priority == 0

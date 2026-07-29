@@ -102,6 +102,28 @@ def _configured_store(tmp_path: Path) -> ConfigStore:
     return store
 
 
+def _add_tv(
+    store: ConfigStore,
+    username: str,
+    *,
+    priority: int,
+    enabled: bool = True,
+) -> PairedUser:
+    """Add an assigned TV to a configured test store."""
+    user = PairedUser(
+        username=username,
+        clientkey="k",
+        devicetype="TV",
+        created="2026-06-10",
+        enabled=enabled,
+        stream_priority=priority,
+        entertainment_area=f"area-{username}",
+        lights=[VirtualLight(id="1", name=username, channels=[len(store.config.users)])],
+    )
+    store.config.users.append(user)
+    return user
+
+
 async def _wait_until(predicate: Callable[[], bool], max_wait: float = 2.0) -> bool:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + max_wait
@@ -132,6 +154,9 @@ async def test_engine_streams_on_submit(tmp_path: Path, monkeypatch) -> None:
     first_frame = created[0].frames[0]
     assert isinstance(first_frame, list)
     assert first_frame[0].channel_id == 0
+    assert await _wait_until(lambda: engine._transition_task is None)
+    engine.submit_color("tv1", "1", (0, 65535, 0))
+    assert engine._transition_task is None
     await engine.stop()
     assert not engine.is_streaming
 
@@ -200,13 +225,13 @@ def test_apply_identify_blinks_then_expires(tmp_path: Path) -> None:
     """An identified light is forced full-white/off, and the entry expires after its window."""
     store = _configured_store(tmp_path)
     engine = Engine(store)
-    engine._identify["1"] = time.monotonic() + 5.0
-    engine._apply_identify()
+    engine._identify["tv1"] = {"1": time.monotonic() + 5.0}
+    engine._apply_identify("tv1")
     assert engine._smoothed_buffer.get_color("1") in {(65535, 65535, 65535), (0, 0, 0)}
-    assert "1" in engine._identify
-    engine._identify["1"] = time.monotonic() - 1.0  # already expired
-    engine._apply_identify()
-    assert "1" not in engine._identify
+    assert "1" in engine._identify["tv1"]
+    engine._identify["tv1"]["1"] = time.monotonic() - 1.0  # already expired
+    engine._apply_identify("tv1")
+    assert "tv1" not in engine._identify
 
 
 async def test_identify_opens_a_stream(tmp_path: Path, monkeypatch) -> None:
@@ -221,9 +246,9 @@ async def test_identify_opens_a_stream(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
     engine = Engine(_configured_store(tmp_path))
     engine.identify("tv1", "1")
-    assert "1" in engine._identify
-    assert engine.stream_owner == "tv1"
+    assert "1" in engine._identify["tv1"]
     assert await _wait_until(lambda: engine.is_streaming)
+    assert engine.stream_owner == "tv1"
     await engine.stop()
 
 
@@ -238,8 +263,8 @@ def test_resolve_smoothing_is_per_tv_else_off(tmp_path: Path) -> None:
     assert engine._resolve_smoothing() == 0.6  # the TV's own setting
 
 
-def test_submit_color_adopts_owner_only_once(tmp_path: Path) -> None:
-    """submit_color adopts the first real owner and never lets a later TV steal it."""
+def test_submit_color_keeps_tv_buffers_isolated(tmp_path: Path) -> None:
+    """Colors from a waiting TV cannot overwrite the active TV's same-numbered lights."""
     store = ConfigStore(tmp_path / "config.yaml")
     store.load()
     store.config.users = [
@@ -251,15 +276,20 @@ def test_submit_color_adopts_owner_only_once(tmp_path: Path) -> None:
             entertainment_area="area-1",
             lights=[VirtualLight(id="1", name="Left", channels=[0])],
         ),
+        PairedUser(
+            username="tv2",
+            clientkey="k",
+            devicetype="TV",
+            created="2026-06-10",
+            entertainment_area="area-2",
+            lights=[VirtualLight(id="1", name="Right", channels=[1])],
+        ),
     ]
-    # No real bridge configured => no stream starts, so ownership is asserted in isolation.
     engine = Engine(store)
-    engine.submit_color(None, "1", (1, 2, 3))
-    assert engine.stream_owner is None
     engine.submit_color("tv1", "1", (1, 2, 3))
-    assert engine.stream_owner == "tv1"
-    engine.submit_color("tv2", "1", (1, 2, 3))
-    assert engine.stream_owner == "tv1"
+    engine.submit_color("tv2", "1", (4, 5, 6))
+    assert engine._owner_buffers["tv1"].get_color("1") == (1, 2, 3)
+    assert engine._owner_buffers["tv2"].get_color("1") == (4, 5, 6)
 
 
 async def test_stop_during_startup_discards_the_stream(tmp_path: Path, monkeypatch) -> None:
@@ -307,10 +337,140 @@ async def test_start_stream_sets_owner_then_clears_on_stop(tmp_path: Path, monke
     monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
     engine = Engine(_configured_store(tmp_path))
     engine.start_stream("tv1")
-    assert engine.stream_owner == "tv1"
     assert await _wait_until(lambda: engine.is_streaming)
+    assert engine.stream_owner == "tv1"
     await engine.stop()
     assert engine.stream_owner is None
+
+
+async def test_higher_priority_tv_preempts_active_stream(tmp_path: Path, monkeypatch) -> None:
+    """A higher-priority request closes the old area before opening the new TV's area."""
+    store = _configured_store(tmp_path)
+    store.config.users[0].stream_priority = 1
+    _add_tv(store, "tv2", priority=10)
+    created: list[_FakeSession] = []
+
+    def factory(*args: object, **kwargs: object) -> _FakeSession:
+        session = _FakeSession(*args, **kwargs)  # type: ignore[arg-type]
+        created.append(session)
+        return session
+
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    engine = Engine(store)
+    assert engine.start_stream("tv1")
+    assert await _wait_until(lambda: engine.is_streaming and engine.stream_owner == "tv1")
+
+    assert engine.start_stream("tv2")
+    assert await _wait_until(
+        lambda: len(created) == 2 and engine.is_streaming and engine.stream_owner == "tv2"
+    )
+    assert created[0].connected is False
+    await engine.stop()
+
+
+async def test_equal_priority_tv_does_not_preempt_current_owner(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The current owner keeps the stream when another TV has the same priority."""
+    store = _configured_store(tmp_path)
+    store.config.users[0].stream_priority = 5
+    _add_tv(store, "tv2", priority=5)
+    created: list[_FakeSession] = []
+
+    def factory(*args: object, **kwargs: object) -> _FakeSession:
+        session = _FakeSession(*args, **kwargs)  # type: ignore[arg-type]
+        created.append(session)
+        return session
+
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    engine = Engine(store)
+    assert engine.start_stream("tv1")
+    assert await _wait_until(lambda: engine.is_streaming)
+
+    assert engine.start_stream("tv2") is False
+    await asyncio.sleep(0.05)
+    assert engine.stream_owner == "tv1"
+    assert len(created) == 1
+    await engine.stop()
+
+
+async def test_enabling_pending_tv_starts_its_stream(tmp_path: Path, monkeypatch) -> None:
+    """A disabled TV's accepted activation starts outbound when REST enables that TV."""
+    store = _configured_store(tmp_path)
+    store.config.users[0].enabled = False
+    created: list[_FakeSession] = []
+
+    def factory(*args: object, **kwargs: object) -> _FakeSession:
+        session = _FakeSession(*args, **kwargs)  # type: ignore[arg-type]
+        created.append(session)
+        return session
+
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    engine = Engine(store)
+    assert engine.start_stream("tv1")
+    await asyncio.sleep(0.05)
+    assert not created
+    assert engine.stream_owner is None
+
+    store.config.users[0].enabled = True
+    engine.tv_settings_changed("tv1")
+    assert await _wait_until(lambda: engine.is_streaming and engine.stream_owner == "tv1")
+    await engine.stop()
+
+
+async def test_disabling_owner_hands_stream_to_pending_tv(tmp_path: Path, monkeypatch) -> None:
+    """Disabling the current TV stops it and starts the best pending eligible TV."""
+    store = _configured_store(tmp_path)
+    store.config.users[0].stream_priority = 10
+    waiting = _add_tv(store, "tv2", priority=1)
+    created: list[_FakeSession] = []
+
+    def factory(*args: object, **kwargs: object) -> _FakeSession:
+        session = _FakeSession(*args, **kwargs)  # type: ignore[arg-type]
+        created.append(session)
+        return session
+
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    engine = Engine(store)
+    assert engine.start_stream("tv1")
+    assert await _wait_until(lambda: engine.is_streaming and engine.stream_owner == "tv1")
+    assert engine.start_stream("tv2") is False
+
+    store.config.users[0].enabled = False
+    engine.tv_settings_changed("tv1")
+    assert await _wait_until(
+        lambda: (
+            len(created) == 2 and engine.is_streaming and engine.stream_owner == waiting.username
+        )
+    )
+    assert created[0].connected is False
+    await engine.stop()
+
+
+async def test_enabling_lower_priority_tv_does_not_preempt(tmp_path: Path, monkeypatch) -> None:
+    """A pending TV enabled through REST waits while a higher-priority TV is streaming."""
+    store = _configured_store(tmp_path)
+    store.config.users[0].stream_priority = 10
+    waiting = _add_tv(store, "tv2", priority=1, enabled=False)
+    created: list[_FakeSession] = []
+
+    def factory(*args: object, **kwargs: object) -> _FakeSession:
+        session = _FakeSession(*args, **kwargs)  # type: ignore[arg-type]
+        created.append(session)
+        return session
+
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    engine = Engine(store)
+    assert engine.start_stream("tv1")
+    assert await _wait_until(lambda: engine.is_streaming)
+    assert engine.start_stream("tv2")
+
+    waiting.enabled = True
+    engine.tv_settings_changed("tv2")
+    await asyncio.sleep(0.05)
+    assert engine.stream_owner == "tv1"
+    assert len(created) == 1
+    await engine.stop()
 
 
 async def test_health_recovers_on_silent_bridge_drop(tmp_path: Path, monkeypatch) -> None:

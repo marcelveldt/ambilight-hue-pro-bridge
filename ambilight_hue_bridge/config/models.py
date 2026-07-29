@@ -30,6 +30,10 @@ class PairedUser:
     clientkey: str
     devicetype: str
     created: str
+    # Whether this TV may open an outbound Hue Entertainment session.
+    enabled: bool = True
+    # Higher values win when multiple TVs request the bridge's single streaming slot.
+    stream_priority: int = 0
     # Per-TV assignment: the source-bridge entertainment area this TV drives, whether to split
     # gradient lights into per-zone virtual lights, and the resulting lights exposed to this TV.
     # Unassigned (empty area) => the TV sees no lights and does not stream until assigned.

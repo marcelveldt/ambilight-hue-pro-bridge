@@ -23,6 +23,21 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+class _FakePolicyEngine:
+    """Engine stand-in recording TV policy notifications."""
+
+    def __init__(self) -> None:
+        self.stream_owner: str | None = None
+        self.is_streaming = False
+        self.changed: list[str] = []
+
+    def tv_settings_changed(self, owner: str) -> None:
+        self.changed.append(owner)
+
+    async def remove_tv(self, _owner: str) -> None:
+        return
+
+
 @pytest.fixture
 def web_setup(tmp_path: Path) -> tuple[web.Application, ConfigStore]:
     """Build the web app over a temp config store."""
@@ -55,6 +70,57 @@ async def test_tvs_lists_paired_users(aiohttp_client, web_setup) -> None:
     tvs = await (await client.get("/cfg/tvs")).json()
     assert tvs[0]["devicetype"] == "55POS9002/12"
     assert tvs[0]["streaming"] is False
+    assert tvs[0]["enabled"] is True
+    assert tvs[0]["stream_priority"] == 0
+
+
+async def test_tv_policy_get_and_update(aiohttp_client, tmp_path) -> None:
+    """The per-TV REST resource exposes and applies enabled state and stream priority."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    store.config.users = [
+        PairedUser(username="u1", clientkey="k", devicetype="TV", created="2026-06-10"),
+    ]
+    engine = _FakePolicyEngine()
+    server = WebServer(
+        store=store,
+        engine=engine,  # type: ignore[arg-type]
+        mac="aabbccddeeff",
+        host_ip="1.2.3.4",
+        http_port=8080,
+    )
+    app = web.Application()
+    server.register(app)
+    client = await aiohttp_client(app)
+
+    updated = await (
+        await client.put("/cfg/tvs/u1", json={"enabled": False, "stream_priority": 42})
+    ).json()
+    assert updated["enabled"] is False
+    assert updated["stream_priority"] == 42
+    assert engine.changed == ["u1"]
+
+    fetched = await (await client.get("/cfg/tvs/u1")).json()
+    assert fetched["enabled"] is False
+    assert fetched["stream_priority"] == 42
+
+
+async def test_tv_policy_rejects_invalid_values(aiohttp_client, web_setup) -> None:
+    """Policy updates reject non-boolean enablement and out-of-range priorities."""
+    app, store = web_setup
+    store.config.users = [
+        PairedUser(username="u1", clientkey="k", devicetype="TV", created="2026-06-10"),
+    ]
+    client = await aiohttp_client(app)
+    assert (await client.put("/cfg/tvs/u1", json={"enabled": "false"})).status == 400
+    assert (await client.put("/cfg/tvs/u1", json={"stream_priority": 101})).status == 400
+    assert (
+        await client.put(
+            "/cfg/tvs/u1",
+            json={"enabled": False, "stream_priority": 101},
+        )
+    ).status == 400
+    assert store.config.users[0].enabled is True
 
 
 async def test_assign_tv_builds_lights_from_area(aiohttp_client, web_setup, monkeypatch) -> None:
@@ -262,6 +328,8 @@ async def test_index_is_served(aiohttp_client, web_setup) -> None:
     assert resp.status == 200
     body = await resp.text()
     assert "Ambilight" in body
+    assert "Stream priority" in body
+    assert "data-enabled" in body
     assert '<base href="/" />' in body
 
 

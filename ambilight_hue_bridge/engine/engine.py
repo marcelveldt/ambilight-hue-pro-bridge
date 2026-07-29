@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from hue_entertainment import EntertainmentSession
 
 from ambilight_hue_bridge.const import MAX_STREAM_SMOOTHING
-from ambilight_hue_bridge.outbound.controller import active_bridge, tv_stream_target
+from ambilight_hue_bridge.outbound.controller import active_bridge, paired_user, tv_stream_target
 
 from .ingest import ColorBuffer
 from .mapping import map_to_commands
@@ -54,6 +54,7 @@ class Engine:
         rate = rate_hz if rate_hz is not None else store.config.virtual_bridge.stream_rate_hz
         self._interval = 1.0 / max(1, rate)
         self._buffer = ColorBuffer()
+        self._owner_buffers: dict[str, ColorBuffer] = {}
         # Smoothed (eased) colors actually streamed to the bridge: float state for precision
         # plus an int buffer the mapper reads, so abrupt TV color jumps become fades.
         self._smoothed_float: dict[str, tuple[float, float, float]] = {}
@@ -61,8 +62,11 @@ class Engine:
         self._session: EntertainmentSession | None = None
         self._ticker: asyncio.Task[None] | None = None
         self._health_task: asyncio.Task[None] | None = None
-        self._start_task: asyncio.Task[None] | None = None
-        self._last_update = 0.0
+        self._transition_task: asyncio.Task[None] | None = None
+        self._last_updates: dict[str, float] = {}
+        self._active_owners: set[str] = set()
+        self._request_order: dict[str, int] = {}
+        self._next_request_order = 0
         # active_streamer rid the bridge reports for us, captured (once, positively) the first
         # time the bridge names our streamer, so the health monitor can tell our own stream from
         # a foreign takeover. The boolean distinguishes "captured" from the transient empty rid
@@ -75,8 +79,7 @@ class Engine:
         # Set by the health monitor when the bridge has ended our stream; the ticker watches it
         # and tears down (keeping teardown a single-owner path).
         self._remote_dead = False
-        # Username (paired TV) that owns the active outbound stream, for the web UI + the
-        # single-stream guard. Cleared on teardown.
+        # Username (paired TV) that owns the active or currently-opening outbound stream.
         self._stream_owner: str | None = None
         # The lights mapped for the active stream (the owning TV's assigned lights), resolved
         # when the stream starts. Cleared on teardown.
@@ -85,8 +88,8 @@ class Engine:
         # bridge is not reliably cancellable, so a start that completes after a stop checks this
         # to discard itself instead of leaving a zombie stream behind.
         self._stream_gen = 0
-        # Lights the TV asked to identify (blink), keyed by light id -> blink expiry (monotonic).
-        self._identify: dict[str, float] = {}
+        # Lights each TV asked to identify, keyed by owner then light id -> blink expiry.
+        self._identify: dict[str, dict[str, float]] = {}
         # One-shot diagnostic flags so the streaming hot path logs its first event of each
         # kind (first color in, first frame out, why it can't start) without per-frame spam.
         self._logged_submit = False
@@ -115,53 +118,113 @@ class Engine:
         :param light_id: The virtual light id the color applies to.
         :param rgb: 16-bit RGB tuple (0-65535 per channel).
         """
-        # Older TVs drive lights over plain v1 REST and never activate an entertainment group,
-        # so they never call start_stream; adopt the owner from the first color they push.
-        if owner and self._stream_owner is None:
-            self._stream_owner = owner
-        self._buffer.set_color(light_id, rgb)
-        self._last_update = time.monotonic()
+        now = time.monotonic()
+        if owner:
+            # Keep colors isolated because every TV uses the same virtual light ids. A denied TV
+            # may continue sending while another one owns the real bridge.
+            self._owner_buffers.setdefault(owner, ColorBuffer()).set_color(light_id, rgb)
+            self._last_updates[owner] = now
+            self._remember_request(owner)
+        else:
+            self._buffer.set_color(light_id, rgb)
         if not self._logged_submit:
             self._logged_submit = True
             LOGGER.info("First inbound color submitted: light=%s rgb=%s", light_id, rgb)
-        if self._may_start():
-            self._start_task = asyncio.create_task(self._start_stream())
+        if owner and self._preferred_owner() == owner:
+            self._schedule_reconcile()
         elif (
             not self.is_streaming
-            and self._start_task is None
+            and self._transition_task is None
             and not self._logged_no_stream
             and time.monotonic() >= self._regrab_block_until
         ):
             self._logged_no_stream = True
             bridge = active_bridge(self._store)
-            area, lights = tv_stream_target(self._store, self._stream_owner)
+            user = paired_user(self._store, owner)
+            area, lights = tv_stream_target(self._store, owner)
             LOGGER.warning(
-                "Not starting outbound stream: owner=%s bridge=%s client_key=%s "
-                "area=%r lights=%d (assign this TV an entertainment area in the web UI)",
-                self._stream_owner,
+                "Not starting outbound stream: owner=%s enabled=%s bridge=%s client_key=%s "
+                "area=%r lights=%d",
+                owner,
+                user.enabled if user is not None else None,
                 bridge.id if bridge else None,
                 bool(bridge and bridge.client_key),
                 area,
                 len(lights),
             )
 
-    def start_stream(self, owner: str) -> None:
+    def start_stream(self, owner: str) -> bool:
         """
-        Proactively open the outbound stream (e.g. when the TV activates entertainment).
+        Register a TV's activation request and open the stream when it wins arbitration.
 
         Opening the DTLS stream to the real bridge ahead of the first frame hides the
-        handshake latency, so the very first colors aren't lost.
+        handshake latency. Disabled or not-yet-configured TVs remain pending so enabling or
+        assigning them later can start the real stream without making the TV reconnect.
 
         :param owner: The paired username activating the stream.
+        :return: True when the virtual bridge can accept the request; False when another active
+            TV has equal or higher priority.
         """
-        self._last_update = time.monotonic()
-        self._stream_owner = owner
-        if self._may_start():
-            self._start_task = asyncio.create_task(self._start_stream())
+        user = paired_user(self._store, owner)
+        if user is None:
+            return False
+        self._last_updates[owner] = time.monotonic()
+        self._remember_request(owner)
+        if not self._owner_ready(owner):
+            return True
+        preferred = self._preferred_owner()
+        if preferred != owner:
+            LOGGER.warning(
+                "Denying entertainment stream for %s: %s has equal or higher priority",
+                owner,
+                preferred,
+            )
+            return False
+        self._schedule_reconcile()
+        return True
 
-    async def stop_stream(self) -> None:
-        """Stop the outbound stream (e.g. when the TV deactivates entertainment)."""
-        await self.stop()
+    def release_stream(self, owner: str) -> None:
+        """Record that a TV no longer requests streaming, keeping its current session warm."""
+        self._active_owners.discard(owner)
+        self._request_order.pop(owner, None)
+        self._identify.pop(owner, None)
+        if self._stream_owner == owner and self._preferred_owner() is not None:
+            self._schedule_reconcile()
+
+    def tv_settings_changed(self, owner: str) -> None:
+        """Re-evaluate ownership after a TV's enabled state or priority changes."""
+        now = time.monotonic()
+        if (
+            owner in self._active_owners
+            and now - self._last_updates.get(owner, 0.0) < IDLE_TIMEOUT_S
+        ):
+            self._last_updates[owner] = now
+        self._schedule_reconcile()
+
+    async def remove_tv(self, owner: str) -> None:
+        """Forget a removed TV and stop or hand off its outbound stream."""
+        self._active_owners.discard(owner)
+        self._request_order.pop(owner, None)
+        self._last_updates.pop(owner, None)
+        self._owner_buffers.pop(owner, None)
+        self._identify.pop(owner, None)
+        if self._stream_owner == owner:
+            await self.stop_stream(owner)
+        else:
+            self._schedule_reconcile()
+
+    async def stop_stream(self, owner: str | None = None) -> None:
+        """Stop one TV's outbound stream, or all streaming when owner is omitted."""
+        if owner is None:
+            await self.stop()
+            return
+        self.release_stream(owner)
+        if self._stream_owner != owner:
+            return
+        self._stream_gen += 1
+        await self._cancel_transition()
+        await self._teardown()
+        self._schedule_reconcile()
 
     def identify(self, owner: str, light_id: str, *, sustained: bool = False) -> None:
         """
@@ -174,47 +237,129 @@ class Engine:
         :param light_id: The virtual light id to flash.
         :param sustained: Whether this is a long 'lselect' identify rather than a single blink.
         """
-        self._last_update = time.monotonic()
-        self._identify[light_id] = self._last_update + (
+        now = time.monotonic()
+        self._last_updates[owner] = now
+        self._remember_request(owner)
+        if self._preferred_owner() != owner:
+            return
+        self._identify.setdefault(owner, {})[light_id] = now + (
             _IDENTIFY_LSELECT_S if sustained else _IDENTIFY_SELECT_S
         )
-        if owner and self._stream_owner is None:
-            self._stream_owner = owner
-        if self._may_start():
-            self._start_task = asyncio.create_task(self._start_stream())
+        self._schedule_reconcile()
 
     def stop_identify(self, light_id: str) -> None:
         """Cancel a light's identify blink (the TV's alert 'none')."""
-        self._identify.pop(light_id, None)
+        for lights in self._identify.values():
+            lights.pop(light_id, None)
 
     async def stop(self) -> None:
         """Stop the outbound stream and any background tasks."""
-        # Invalidate any in-flight startup before we wait on it, so a connect that finishes
-        # during the await discards itself rather than starting a ticker we just tore down.
+        self._active_owners.clear()
+        self._request_order.clear()
         self._stream_gen += 1
-        if self._start_task is not None:
-            self._start_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._start_task
-            self._start_task = None
+        await self._cancel_transition()
         await self._teardown()
 
-    def _can_stream(self) -> bool:
-        """Return whether the active bridge has credentials and the owner resolves to an area."""
+    def _remember_request(self, owner: str) -> None:
+        """Track a TV's active stream intent without changing the order on every frame."""
+        if paired_user(self._store, owner) is not None and owner not in self._active_owners:
+            self._active_owners.add(owner)
+            self._request_order[owner] = self._next_request_order
+            self._next_request_order += 1
+
+    def _owner_ready(self, owner: str) -> bool:
+        """Return whether a TV is enabled and has a usable outbound stream target."""
+        user = paired_user(self._store, owner)
+        if user is None or not user.enabled:
+            return False
         bridge = active_bridge(self._store)
         if bridge is None or not bridge.client_key:
             return False
-        area, _ = tv_stream_target(self._store, self._stream_owner)
+        area, _ = tv_stream_target(self._store, owner)
         return bool(area)
 
-    def _may_start(self) -> bool:
-        """Whether a new outbound stream may be opened now (idle, allowed, not backing off)."""
-        return (
-            not self.is_streaming
-            and self._start_task is None
-            and time.monotonic() >= self._regrab_block_until
-            and self._can_stream()
+    def _preferred_owner(self) -> str | None:
+        """Return the highest-priority active, ready TV; preserve the current owner on ties."""
+        now = time.monotonic()
+        candidates = [
+            owner
+            for owner in self._active_owners
+            if now - self._last_updates.get(owner, 0.0) < IDLE_TIMEOUT_S
+            and self._owner_ready(owner)
+        ]
+        if not candidates:
+            return None
+        highest = max(self._priority(owner) for owner in candidates)
+        current = self._stream_owner
+        if current in candidates and self._priority(current) == highest:
+            return current
+        return min(
+            (owner for owner in candidates if self._priority(owner) == highest),
+            key=lambda owner: self._request_order[owner],
         )
+
+    def _priority(self, owner: str) -> int:
+        """Return a paired TV's configured stream priority."""
+        user = paired_user(self._store, owner)
+        return user.stream_priority if user is not None else 0
+
+    def _schedule_reconcile(self) -> None:
+        """Schedule serialized ownership reconciliation without blocking request handlers."""
+        desired = self._preferred_owner()
+        current = self._stream_owner
+        if self._transition_task is not None:
+            if current is not None and (
+                not self._owner_ready(current) or (desired is not None and desired != current)
+            ):
+                self._stream_gen += 1
+            return
+        if self.is_streaming and current is not None and current == desired:
+            return
+        if current is None and time.monotonic() < self._regrab_block_until:
+            return
+        self._transition_task = asyncio.create_task(self._reconcile())
+
+    async def _cancel_transition(self) -> None:
+        """Cancel and await an in-flight ownership transition."""
+        task = self._transition_task
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        self._transition_task = None
+
+    async def _reconcile(self) -> None:
+        """Stop, start, or hand off the single outbound stream to the preferred TV."""
+        try:
+            while True:
+                desired = self._preferred_owner()
+                current = self._stream_owner
+                if current is not None and not self._owner_ready(current):
+                    self._stream_gen += 1
+                    await self._teardown()
+                    continue
+                if desired is None:
+                    return
+                if current is not None and current != desired:
+                    self._stream_gen += 1
+                    await self._teardown()
+                    continue
+                if self.is_streaming:
+                    return
+                if time.monotonic() < self._regrab_block_until:
+                    return
+                if current is None:
+                    self._stream_owner = desired
+                self._buffer = self._owner_buffers.setdefault(desired, ColorBuffer())
+                started = await self._open_stream(desired)
+                if started:
+                    continue
+                if self._preferred_owner() != desired:
+                    continue
+                return
+        finally:
+            self._transition_task = None
 
     def _apply_smoothing(self, lights: list[VirtualLight]) -> None:
         """
@@ -243,37 +388,38 @@ class Engine:
 
     def _resolve_smoothing(self) -> float:
         """Return the owning TV's smoothing setting, or 0.0 (off) when it has none."""
-        owner = self._stream_owner
-        if owner:
-            for user in self._store.config.users:
-                if user.username == owner and user.stream_smoothing is not None:
-                    return user.stream_smoothing
+        user = paired_user(self._store, self._stream_owner)
+        if user is not None and user.stream_smoothing is not None:
+            return user.stream_smoothing
         return 0.0
 
-    def _apply_identify(self) -> None:
+    def _apply_identify(self, owner: str) -> None:
         """Overlay a full-white blink on lights the TV asked to identify; expire finished ones."""
-        if not self._identify:
+        identified = self._identify.get(owner)
+        if not identified:
             return
         now = time.monotonic()
-        for light_id in [lid for lid, expiry in self._identify.items() if now >= expiry]:
-            del self._identify[light_id]
-        if not self._identify:
+        for light_id in [lid for lid, expiry in identified.items() if now >= expiry]:
+            del identified[light_id]
+        if not identified:
+            self._identify.pop(owner, None)
             return
         # Keep the stream alive while identifying, then flash full white on/off.
-        self._last_update = now
+        self._last_updates[owner] = now
         rgb = _IDENTIFY_RGB if int(now * 2 * _IDENTIFY_BLINK_HZ) % 2 == 0 else (0, 0, 0)
-        for light_id in self._identify:
+        for light_id in identified:
             self._smoothed_buffer.set_color(light_id, rgb)
 
-    async def _start_stream(self) -> None:
-        """Open the entertainment session for the owning TV's area and start the ticker."""
+    async def _open_stream(self, owner: str) -> bool:
+        """Open the entertainment session for one TV and start its ticker."""
         bridge = active_bridge(self._store)
         if bridge is None:
-            self._start_task = None
-            return
+            if self._stream_owner == owner:
+                self._stream_owner = None
+            return False
         # The owner's assigned area + lights ("", [] when the TV is unassigned).
         gen = self._stream_gen
-        area, lights = tv_stream_target(self._store, self._stream_owner)
+        area, lights = tv_stream_target(self._store, owner)
         session = EntertainmentSession(
             bridge.host,
             bridge.app_key,
@@ -285,26 +431,9 @@ class Engine:
                 "Starting outbound stream to %s area %s (owner=%s)",
                 bridge.host,
                 area,
-                self._stream_owner,
+                owner,
             )
             await session.start(area)
-            if gen != self._stream_gen:
-                # The TV deactivated while we were connecting; abandon this session.
-                LOGGER.info(
-                    "Discarding outbound stream to %s area %s: stopped mid-connect",
-                    bridge.host,
-                    area,
-                )
-                await session.aclose()
-                return
-            self._session = session
-            self._stream_lights = lights
-            self._remote_dead = False
-            self._our_streamer_rid = ""
-            self._streamer_rid_captured = False
-            self._ticker = asyncio.create_task(self._run_ticker())
-            self._health_task = asyncio.create_task(self._run_health())
-            LOGGER.info("Outbound stream started to %s area %s", bridge.host, area)
         except asyncio.CancelledError:
             # stop() cancelled us mid-connect. If the cancel landed after session.start() had
             # already activated the area on the bridge (its pre-DTLS HTTP PUT), the session is
@@ -316,17 +445,44 @@ class Engine:
             LOGGER.exception("Failed to start outbound stream to %s area %s", bridge.host, area)
             with suppress(Exception):
                 await session.aclose()
-        finally:
-            self._start_task = None
+            if self._stream_owner == owner:
+                self._stream_owner = None
+            return False
+        else:
+            if gen != self._stream_gen:
+                LOGGER.info(
+                    "Discarding outbound stream to %s area %s: ownership changed mid-connect",
+                    bridge.host,
+                    area,
+                )
+                await session.aclose()
+                if self._stream_owner == owner:
+                    self._stream_owner = None
+                return False
+            self._session = session
+            self._stream_lights = lights
+            self._remote_dead = False
+            self._our_streamer_rid = ""
+            self._streamer_rid_captured = False
+            self._ticker = asyncio.create_task(self._run_ticker(owner))
+            self._health_task = asyncio.create_task(self._run_health(owner, session))
+            LOGGER.info("Outbound stream started to %s area %s", bridge.host, area)
+            return True
 
-    async def _run_ticker(self) -> None:
+    async def _run_ticker(self, owner: str) -> None:
         """Send the buffered colors to the bridge at a fixed rate until inactivity."""
         try:
-            while time.monotonic() - self._last_update < IDLE_TIMEOUT_S:
-                if self._remote_dead or self._session is None or not self._session.is_streaming:
+            while time.monotonic() - self._last_updates.get(owner, 0.0) < IDLE_TIMEOUT_S:
+                session = self._session
+                if (
+                    self._stream_owner != owner
+                    or self._remote_dead
+                    or session is None
+                    or not session.is_streaming
+                ):
                     break
                 self._apply_smoothing(self._stream_lights)
-                self._apply_identify()
+                self._apply_identify(owner)
                 commands = map_to_commands(self._stream_lights, self._smoothed_buffer)
                 if commands:
                     if not self._logged_tick:
@@ -336,7 +492,7 @@ class Engine:
                             len(commands),
                             [command.channel_id for command in commands],
                         )
-                    self._session.send(commands)
+                    session.send(commands)
                 elif not self._logged_empty:
                     self._logged_empty = True
                     LOGGER.warning(
@@ -345,10 +501,11 @@ class Engine:
                     )
                 await asyncio.sleep(self._interval)
         finally:
-            await self._teardown()
-            LOGGER.info("Outbound stream stopped")
+            if self._stream_owner == owner:
+                await self._teardown()
+                LOGGER.info("Outbound stream stopped")
 
-    async def _run_health(self) -> None:
+    async def _run_health(self, owner: str, tracked_session: EntertainmentSession) -> None:
         """
         Poll the bridge's view of our stream and flag it dead if the bridge silently ended it.
 
@@ -357,7 +514,7 @@ class Engine:
         entertainment status and, on a confirmed loss, sets the flag the ticker watches so the
         stream tears down and re-establishes on the next inbound frame.
         """
-        if self._session is not None and not hasattr(self._session, "remote_status"):
+        if not hasattr(tracked_session, "remote_status"):
             LOGGER.warning(
                 "Installed hue-entertainment has no remote_status(); skipping stream health "
                 "checks - update the library to enable silent-drop recovery",
@@ -367,7 +524,12 @@ class Engine:
         while True:
             await asyncio.sleep(_HEALTH_POLL_S)
             session = self._session
-            if session is None or not session.is_streaming or self._remote_dead:
+            if (
+                self._stream_owner != owner
+                or session is not tracked_session
+                or not session.is_streaming
+                or self._remote_dead
+            ):
                 return
             try:
                 status, rid = await session.remote_status()

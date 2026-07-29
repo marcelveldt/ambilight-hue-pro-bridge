@@ -15,12 +15,12 @@ over the low-latency Entertainment API.
 3. Install the **Ambilight+Hue Pro Bridge** add-on and start it.
 4. Open the web UI — either **Open Web UI** on the add-on page / the **Ambilight Bridge** sidebar
    entry (ingress, no extra port), or directly at `http://<your-ha-host>:80`. Pair your real Hue
-   bridge and assign each TV an entertainment area.
+   bridge and assign each TV an entertainment area, enabled state, and stream priority.
 
 ## Configuration
 
-The Hue bridge itself (real bridge pairing, per-TV areas) is configured from the web UI. The
-add-on has a few options on its **Configuration** tab:
+The Hue bridge itself (real bridge pairing, per-TV areas, enabled state, and stream priority) is
+configured from the web UI. The add-on has a few options on its **Configuration** tab:
 
 - **`http_port`** (default `80`) — the port the Hue API is served on. Ambilight TVs assume `80`;
   only change it if something else on the host needs that port.

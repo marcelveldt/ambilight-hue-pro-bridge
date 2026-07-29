@@ -12,6 +12,7 @@ from ambilight_hue_bridge.const import PAIR_DEVICE_TYPE
 if TYPE_CHECKING:
     from hue_entertainment import EntertainmentArea
 
+    from ambilight_hue_bridge.config.models import PairedUser
     from ambilight_hue_bridge.config.store import ConfigStore
 
 # Hue v1 light names are capped at 32 chars; longer names are rejected and some TVs then show
@@ -74,11 +75,8 @@ def tv_lights(store: ConfigStore, username: str | None) -> list[VirtualLight]:
     Each TV gets only the lights of its assigned entertainment area; an unassigned TV sees
     no lights until an area is assigned to it in the web UI.
     """
-    if username:
-        for user in store.config.users:
-            if user.username == username:
-                return user.lights
-    return []
+    user = paired_user(store, username)
+    return user.lights if user is not None else []
 
 
 def tv_stream_target(
@@ -91,11 +89,17 @@ def tv_stream_target(
     Resolved purely from the TV's own assignment; an unassigned TV returns ("", []) and does
     not stream.
     """
+    user = paired_user(store, username)
+    return (user.entertainment_area, user.lights) if user is not None else ("", [])
+
+
+def paired_user(store: ConfigStore, username: str | None) -> PairedUser | None:
+    """Return the paired TV for a username, or None."""
     if username:
         for user in store.config.users:
             if user.username == username:
-                return user.entertainment_area, user.lights
-    return "", []
+                return user
+    return None
 
 
 def active_bridge(store: ConfigStore) -> RealBridge | None:

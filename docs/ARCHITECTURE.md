@@ -231,6 +231,8 @@ users:                               # paired TVs; each is assigned an area in t
     clientkey: "<32 hex PSK>"        # for the TV's inbound DTLS stream
     devicetype: "55POS9002/12"
     created: "2026-06-10T12:00:00"
+    enabled: true                    # false keeps the virtual connection but blocks outbound Hue
+    stream_priority: 0               # 0..100; higher wins the bridge's single streaming slot
     entertainment_area: "<v2 rid>"   # the real-bridge area this TV drives ("" => no lights)
     split_gradients: true            # expose each gradient zone as its own virtual light
     stream_smoothing: null           # per-TV temporal easing (null/0 = off, capped at 0.95)
@@ -247,7 +249,9 @@ and does not stream. A freshly paired TV is auto-assigned the active bridge's fi
 `cached_areas`, so it works even mid discovery-dance); each TV's `lights` are rebuilt from its
 assigned area when you (re)set it in the web UI (split gradients = one virtual light per zone,
 else one per device). Temporal easing is **per TV** (`stream_smoothing`) — fast DTLS TVs want 0,
-~1 Hz REST TVs want easing to fill the gaps. The advertised
+~1 Hz REST TVs want easing to fill the gaps. Enabled state and priority are also per TV. Disabled
+TVs may keep a pending virtual activation but never open the outbound session; a strictly higher
+priority active TV preempts the current owner, while the current owner wins ties. The advertised
 `swversion`/`apiversion`/`datastoreversion` and the bridge model id live in `const.py`; the
 HTTP/HTTPS ports are command-line options, not persisted. State fields emitted to the TV are
 strictly int-typed, and every exposed light advertises `capabilities.streaming`.
@@ -288,10 +292,12 @@ preview rather than hardcoding indices.
 
 Goal: **when no TV is driving lights, the process is a few idle sockets at ~0% CPU.**
 
-1. **No outbound stream held open when idle.** Activating an Entertainment area takes the
-   real bridge out of normal control and there's a hard concurrent-session limit. Start the
-   outbound stream **lazily** on the first inbound write; **tear down** after an inactivity
-   timeout. The ticker runs only while streaming.
+1. **Only one outbound stream, held open only while useful.** Activating an Entertainment area
+   takes the real bridge out of normal control and there's a hard concurrent-session limit.
+   Track requests per TV, select the highest-priority enabled owner, and preempt only for a
+   strictly higher priority. Start the outbound stream **lazily** on activation or the first
+   inbound write; **tear down** after an inactivity timeout. The ticker runs only while streaming,
+   and per-TV color buffers prevent a waiting TV from overwriting the owner's same-numbered lights.
 2. **Inbound DTLS server.** Enabled by default (`enable_inbound_dtls: true`) and started at
    boot — it's an idle listening socket until a newer TV streams in; the lazy part is the
    *outbound* stream (above), not this listener. Set the flag false for a pure older-TV setup.
@@ -302,7 +308,9 @@ Goal: **when no TV is driving lights, the process is a few idle sockets at ~0% C
 4. **Lazy real-bridge connection;** single event loop, no thread pool (small footprint on a
    Pi / HA-OS).
 
-State machine: `IDLE → (first inbound write) → STREAMING → (inactivity timeout) → IDLE`.
+State machine: `IDLE → (eligible request) → STREAMING(owner) → (higher priority) → HANDOFF →
+STREAMING(new owner)`, with inactivity returning to `IDLE`. Disabled requests stay pending outside
+the outbound state machine and are reconsidered when enabled.
 
 ---
 

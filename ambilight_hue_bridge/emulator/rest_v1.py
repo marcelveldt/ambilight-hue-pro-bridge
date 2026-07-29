@@ -174,7 +174,7 @@ class HueV1Emulator:
         self._engine = engine
         # Per-TV light state, keyed by "<username>/<light_id>" (two TVs may use the same ids).
         self._states: dict[str, dict[str, Any]] = {}
-        self._groups: dict[str, dict[str, Any]] = {}
+        self._groups: dict[str, dict[str, dict[str, Any]]] = {}
         self._next_group_id = 1
 
     def register(self, app: web.Application) -> None:
@@ -267,7 +267,7 @@ class HueV1Emulator:
         return _json(
             {
                 "lights": self._lights_dict(user, lights),
-                "groups": self._groups_dict(lights),
+                "groups": self._groups_dict(user, lights),
                 "config": self._full_config(),
                 "schedules": {},
                 "scenes": {},
@@ -339,7 +339,7 @@ class HueV1Emulator:
         if (unauthorized := self._unauthorized(request)) is not None:
             return unauthorized
         user = request.match_info.get("user", "")
-        return _json(self._groups_dict(tv_lights(self._store, user)))
+        return _json(self._groups_dict(user, tv_lights(self._store, user)))
 
     async def _handle_create_group(self, request: web.Request) -> web.StreamResponse:
         """Create a (possibly entertainment) group (POST /api/{user}/groups)."""
@@ -349,7 +349,7 @@ class HueV1Emulator:
         group_id = str(self._next_group_id)
         self._next_group_id += 1
         group = self._build_group(body)
-        self._groups[group_id] = group
+        self._user_groups(request.match_info.get("user", ""))[group_id] = group
         LOGGER.info("TV created group %s (type=%s)", group_id, group.get("type"))
         return _json([{"success": {"id": group_id}}])
 
@@ -359,7 +359,7 @@ class HueV1Emulator:
             return unauthorized
         user = request.match_info.get("user", "")
         group_id = request.match_info["group_id"]
-        group = self._group_by_id(group_id, tv_lights(self._store, user))
+        group = self._group_by_id(user, group_id, tv_lights(self._store, user))
         if group is None:
             return _error(3, f"/groups/{group_id}", "resource, /groups/{group_id}, not available")
         return _json(group)
@@ -375,12 +375,10 @@ class HueV1Emulator:
         if isinstance(stream, dict):
             active = bool(stream.get("active", False))
             user = request.match_info.get("user", "")
-            owner = self._engine.stream_owner if self._engine is not None else None
-            busy = self._engine is not None and self._engine.is_streaming
-            # Single-stream guard: deny a second TV while another is actively streaming.
-            if active and busy and owner not in (None, user):
+            if active and self._engine is not None and not self._engine.start_stream(user):
                 LOGGER.warning(
-                    "Denying entertainment stream for %s: %s is already streaming", user, owner
+                    "Denying entertainment stream for %s: another TV has priority",
+                    user,
                 )
                 return _error(
                     307,
@@ -389,19 +387,21 @@ class HueV1Emulator:
                 )
             # Track the group the TV streams to even if it never POST-created it, so it stays
             # resolvable across GETs/restarts and is visible in the web UI.
-            group = self._ensure_entertainment_group(group_id, tv_lights(self._store, user))
-            group["stream"]["active"] = active
-            # The TV re-reads the group to confirm it owns the stream before it begins the
-            # DTLS HueStream; with owner left null it may refuse to start or tear down.
-            group["stream"]["owner"] = user if active else None
-            if self._engine is not None and active:
-                # Open the outbound stream now so the DTLS handshake to the real bridge is done
-                # before the TV's first frames arrive (the inbound server is always on). We do
-                # NOT tear it down on active=false: the TV rapidly toggles the stream while in
-                # its configure menu, and a full reconnect (~4 s) per toggle thrashes the real
-                # bridge. Instead the engine keeps the stream warm and idle-times-out on its own
-                # once the TV stops sending frames.
-                self._engine.start_stream(user)
+            group = self._ensure_entertainment_group(user, group_id, tv_lights(self._store, user))
+            if active:
+                group["stream"]["active"] = True
+                # The TV re-reads the group to confirm it owns the virtual stream before beginning
+                # HueStream. A disabled TV still gets this virtual grant; only outbound streaming
+                # is deferred, allowing a later REST enable to take effect without reconnecting.
+                group["stream"]["owner"] = user
+            else:
+                if group["stream"].get("owner") in (None, user):
+                    group["stream"]["active"] = False
+                    group["stream"]["owner"] = None
+                if self._engine is not None:
+                    # Keep the current session warm (the engine idle-times it out) because TVs
+                    # rapidly toggle active while configuring their Ambilight layout.
+                    self._engine.release_stream(user)
             LOGGER.info(
                 "TV %s entertainment stream for group %s",
                 "started" if active else "stopped",
@@ -410,8 +410,9 @@ class HueV1Emulator:
             result.append({"success": {f"/groups/{group_id}/stream/active": active}})
         for key in ("name", "lights", "class", "locations"):
             if key in body:
-                if group_id in self._groups:
-                    self._groups[group_id][key] = body[key]
+                groups = self._user_groups(request.match_info.get("user", ""))
+                if group_id in groups:
+                    groups[group_id][key] = body[key]
                 result.append({"success": {f"/groups/{group_id}/{key}": body[key]}})
         return _json(result or [{"success": {}}])
 
@@ -420,10 +421,10 @@ class HueV1Emulator:
         if (unauthorized := self._unauthorized(request)) is not None:
             return unauthorized
         group_id = request.match_info["group_id"]
-        removed = self._groups.pop(group_id, None)
-        # If the TV was streaming the group it just deleted, stop the outbound stream.
-        if removed is not None and self._engine is not None and self._engine.is_streaming:
-            await self._engine.stop_stream()
+        user = request.match_info.get("user", "")
+        removed = self._user_groups(user).pop(group_id, None)
+        if removed is not None and self._engine is not None:
+            self._engine.release_stream(user)
         return _json([{"success": f"/groups/{group_id} deleted"}])
 
     async def _handle_group_action(self, request: web.Request) -> web.StreamResponse:
@@ -433,7 +434,7 @@ class HueV1Emulator:
         user = request.match_info.get("user", "")
         group_id = request.match_info["group_id"]
         body = await _read_json(request)
-        for light_id in self._group_light_ids(group_id, tv_lights(self._store, user)):
+        for light_id in self._group_light_ids(user, group_id, tv_lights(self._store, user)):
             _coerce_light_state(self._state(user, light_id), body)
             self._submit_color(user, light_id)
         return _json(
@@ -466,11 +467,16 @@ class HueV1Emulator:
         """Return the per-TV light state, creating a default on first access."""
         return self._states.setdefault(f"{user}/{light_id}", default_light_state())
 
-    def _group_light_ids(self, group_id: str, lights: list[VirtualLight]) -> list[str]:
+    def _group_light_ids(
+        self,
+        user: str,
+        group_id: str,
+        lights: list[VirtualLight],
+    ) -> list[str]:
         """Return the light ids belonging to a group (group 0 = the TV's lights)."""
         if group_id == "0":
             return [light.id for light in lights]
-        group = self._groups.get(group_id)
+        group = self._groups.get(user, {}).get(group_id)
         if group is None:
             return []
         return [str(light_id) for light_id in group.get("lights", [])]
@@ -488,10 +494,14 @@ class HueV1Emulator:
         return None
 
     def _ensure_entertainment_group(
-        self, group_id: str, lights: list[VirtualLight]
+        self,
+        user: str,
+        group_id: str,
+        lights: list[VirtualLight],
     ) -> dict[str, Any]:
         """Return the group for an id, lazily creating an Entertainment group if unknown."""
-        group = self._groups.get(group_id)
+        groups = self._user_groups(user)
+        group = groups.get(group_id)
         if group is None or group.get("type") != "Entertainment" or "stream" not in group:
             group = self._build_group(
                 {
@@ -500,22 +510,31 @@ class HueV1Emulator:
                     "lights": [light.id for light in lights],
                 },
             )
-            self._groups[group_id] = group
+            groups[group_id] = group
         return group
 
     def _lights_dict(self, user: str, lights: list[VirtualLight]) -> dict[str, Any]:
         """Build the ``{id: light}`` mapping of the lights exposed to this TV."""
         return {light.id: build_v1_light(light, self._state(user, light.id)) for light in lights}
 
-    def _groups_dict(self, lights: list[VirtualLight]) -> dict[str, Any]:
+    def _groups_dict(self, user: str, lights: list[VirtualLight]) -> dict[str, Any]:
         """Build the ``{id: group}`` mapping, including the implicit group 0."""
-        return {"0": self._group_zero(lights), **self._groups}
+        return {"0": self._group_zero(lights), **self._groups.get(user, {})}
 
-    def _group_by_id(self, group_id: str, lights: list[VirtualLight]) -> dict[str, Any] | None:
+    def _group_by_id(
+        self,
+        user: str,
+        group_id: str,
+        lights: list[VirtualLight],
+    ) -> dict[str, Any] | None:
         """Return a group by id (including group 0), or None."""
         if group_id == "0":
             return self._group_zero(lights)
-        return self._groups.get(group_id)
+        return self._groups.get(user, {}).get(group_id)
+
+    def _user_groups(self, user: str) -> dict[str, dict[str, Any]]:
+        """Return one paired TV's group store, creating it on first write."""
+        return self._groups.setdefault(user, {})
 
     def _group_zero(self, lights: list[VirtualLight]) -> dict[str, Any]:
         """Build the implicit 'all lights' group 0."""

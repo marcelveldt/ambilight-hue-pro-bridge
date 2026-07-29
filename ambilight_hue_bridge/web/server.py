@@ -33,6 +33,8 @@ _PAIR_ERRORS = (TimeoutError, OSError, aiohttp.ClientError)
 # Cap how long we'll wait on the real bridge when listing areas, so an unreachable bridge
 # (e.g. unplugged during TV pairing) fails fast instead of hanging the web UI.
 _LIST_AREAS_TIMEOUT = 5.0
+_MIN_STREAM_PRIORITY = 0
+_MAX_STREAM_PRIORITY = 100
 
 
 class WebServer:
@@ -72,6 +74,7 @@ class WebServer:
                 web.get("/", self._handle_index),
                 web.get("/cfg/status", self._handle_status),
                 web.get("/cfg/tvs", self._handle_tvs),
+                web.get("/cfg/tvs/{username}", self._handle_tv),
                 web.put("/cfg/tvs/{username}", self._handle_assign_tv),
                 web.delete("/cfg/tvs/{username}", self._handle_delete_tv),
                 web.get("/cfg/areas", self._handle_areas_list),
@@ -115,13 +118,44 @@ class WebServer:
             [self._tv_dict(user, owner) for user in self._store.config.users],
         )
 
+    async def _handle_tv(self, request: web.Request) -> web.StreamResponse:
+        """Return one paired TV and its stream policy."""
+        user = self._tv_by_username(request.match_info["username"])
+        if user is None:
+            return web.json_response({"error": "Unknown TV."}, status=404)
+        owner = self._engine.stream_owner if self._engine is not None else None
+        return web.json_response(self._tv_dict(user, owner))
+
     async def _handle_assign_tv(self, request: web.Request) -> web.StreamResponse:
-        """Assign a source entertainment area (+ split mode) to a TV and rebuild its lights."""
+        """Update a TV's assignment, smoothing, enabled state, or stream priority."""
         username = request.match_info["username"]
-        user = next((u for u in self._store.config.users if u.username == username), None)
+        user = self._tv_by_username(username)
         if user is None:
             return web.json_response({"error": "Unknown TV."}, status=404)
         body = await _read_json(request)
+        enabled_update: bool | None = None
+        priority_update: int | None = None
+        if "enabled" in body:
+            enabled_update = body["enabled"]
+            if not isinstance(enabled_update, bool):
+                return web.json_response({"error": "enabled must be a boolean."}, status=400)
+        if "stream_priority" in body:
+            priority_update = body["stream_priority"]
+            if isinstance(priority_update, bool) or not isinstance(priority_update, int):
+                return web.json_response(
+                    {"error": "stream_priority must be an integer."},
+                    status=400,
+                )
+            if not _MIN_STREAM_PRIORITY <= priority_update <= _MAX_STREAM_PRIORITY:
+                return web.json_response(
+                    {
+                        "error": (
+                            f"stream_priority must be between {_MIN_STREAM_PRIORITY} "
+                            f"and {_MAX_STREAM_PRIORITY}."
+                        )
+                    },
+                    status=400,
+                )
         # Only rebuild the lights when the area/split actually change - a smoothing-only edit
         # must not re-fetch the area and renumber lights the TV has already been assigned.
         rebuild = False
@@ -136,6 +170,11 @@ class WebServer:
             user.stream_smoothing = (
                 None if value is None else max(0.0, min(MAX_STREAM_SMOOTHING, float(value)))
             )
+        policy_changed = enabled_update is not None or priority_update is not None
+        if enabled_update is not None:
+            user.enabled = enabled_update
+        if priority_update is not None:
+            user.stream_priority = priority_update
         if rebuild:
             if user.entertainment_area:
                 area = await self._area_by_id(user.entertainment_area)
@@ -145,6 +184,8 @@ class WebServer:
             else:
                 user.lights = []
         self._store.save()
+        if (policy_changed or rebuild) and self._engine is not None:
+            self._engine.tv_settings_changed(username)
         owner = self._engine.stream_owner if self._engine is not None else None
         return web.json_response(self._tv_dict(user, owner))
 
@@ -155,8 +196,8 @@ class WebServer:
         if not any(user.username == username for user in config.users):
             return web.json_response({"error": "Unknown TV."}, status=404)
         config.users = [user for user in config.users if user.username != username]
-        if self._engine is not None and self._engine.stream_owner == username:
-            await self._engine.stop_stream()
+        if self._engine is not None:
+            await self._engine.remove_tv(username)
         self._store.save()
         return web.json_response({"deleted": username})
 
@@ -248,6 +289,8 @@ class WebServer:
             "devicetype": user.devicetype,
             "created": user.created,
             "streaming": user.username == owner,
+            "enabled": user.enabled,
+            "stream_priority": user.stream_priority,
             "entertainment_area": user.entertainment_area,
             "split_gradients": user.split_gradients,
             "stream_smoothing": user.stream_smoothing if user.stream_smoothing is not None else 0.0,
@@ -273,6 +316,13 @@ class WebServer:
         for bridge in self._store.config.real_bridges:
             if bridge.id == bridge_id_value:
                 return bridge
+        return None
+
+    def _tv_by_username(self, username: str) -> PairedUser | None:
+        """Return a paired TV by username, or None."""
+        for user in self._store.config.users:
+            if user.username == username:
+                return user
         return None
 
 

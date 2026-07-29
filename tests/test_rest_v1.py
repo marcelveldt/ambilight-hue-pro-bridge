@@ -53,18 +53,26 @@ class _FakeEngine:
         self.is_streaming = False
         self.started: list[str] = []
         self.stopped = 0
+        self.denied: set[str] = set()
+        self.released: list[str] = []
         self.colors: list[tuple[str, str]] = []
         self.identified: list[tuple[str, str, bool]] = []
 
-    def start_stream(self, owner: str) -> None:
+    def start_stream(self, owner: str) -> bool:
+        if owner in self.denied:
+            return False
         self.stream_owner = owner
         self.is_streaming = True
         self.started.append(owner)
+        return True
 
-    async def stop_stream(self) -> None:
+    async def stop_stream(self, _owner: str | None = None) -> None:
         self.is_streaming = False
         self.stream_owner = None
         self.stopped += 1
+
+    def release_stream(self, owner: str) -> None:
+        self.released.append(owner)
 
     def submit_color(self, owner: str, light_id: str, _rgb: tuple[int, int, int]) -> None:
         self.colors.append((owner, light_id))
@@ -213,12 +221,12 @@ def test_ensure_entertainment_group_tracks_the_tv_group(tmp_path: Path) -> None:
         http_port=80,
     )
     lights = store.config.users[0].lights
-    group = emulator._ensure_entertainment_group("200", lights)
+    group = emulator._ensure_entertainment_group("u1", "200", lights)
     assert group["type"] == "Entertainment"
     assert group["lights"] == ["1", "2"]
     assert "stream" in group
     # Idempotent: a second activation resolves to the same tracked group, not a duplicate.
-    assert emulator._ensure_entertainment_group("200", lights) is group
+    assert emulator._ensure_entertainment_group("u1", "200", lights) is group
 
 
 async def test_put_light_state_echoes_success(aiohttp_client, emulator_setup) -> None:
@@ -264,8 +272,8 @@ async def test_create_group_accepts_trailing_slash(aiohttp_client, emulator_setu
     assert "id" in (await resp.json())[0]["success"]
 
 
-async def test_single_stream_guard_denies_a_second_tv(aiohttp_client, tmp_path) -> None:
-    """While one TV streams, a second is denied (307); the same owner may re-activate."""
+async def test_stream_arbitration_denial_is_returned_to_tv(aiohttp_client, tmp_path) -> None:
+    """An engine priority denial becomes Hue error 307; the current owner may re-activate."""
     app, store, engine = _build_emulator_with_engine(tmp_path)
     store.config.users = [_assigned_user("u1"), _assigned_user("u2")]
     client = await aiohttp_client(app)
@@ -274,6 +282,7 @@ async def test_single_stream_guard_denies_a_second_tv(aiohttp_client, tmp_path) 
     assert ok[0]["success"]["/groups/200/stream/active"] is True
     assert engine.started == ["u1"]
 
+    engine.denied.add("u2")
     denied = await (
         await client.put("/api/u2/groups/200", json={"stream": {"active": True}})
     ).json()
@@ -282,6 +291,32 @@ async def test_single_stream_guard_denies_a_second_tv(aiohttp_client, tmp_path) 
     # The same owner re-activating is not denied.
     again = await (await client.put("/api/u1/groups/200", json={"stream": {"active": True}})).json()
     assert again[0]["success"]["/groups/200/stream/active"] is True
+
+
+async def test_entertainment_group_state_is_isolated_per_tv(aiohttp_client, tmp_path) -> None:
+    """TVs using the same group id each see their own virtual activation owner."""
+    app, store, _engine = _build_emulator_with_engine(tmp_path)
+    store.config.users = [_assigned_user("u1"), _assigned_user("u2")]
+    store.config.users[1].enabled = False
+    client = await aiohttp_client(app)
+
+    await client.put("/api/u1/groups/200", json={"stream": {"active": True}})
+    await client.put("/api/u2/groups/200", json={"stream": {"active": True}})
+
+    group_u1 = await (await client.get("/api/u1/groups/200")).json()
+    group_u2 = await (await client.get("/api/u2/groups/200")).json()
+    assert group_u1["stream"] == {
+        "proxymode": "auto",
+        "proxynode": "/bridge",
+        "active": True,
+        "owner": "u1",
+    }
+    assert group_u2["stream"] == {
+        "proxymode": "auto",
+        "proxynode": "/bridge",
+        "active": True,
+        "owner": "u2",
+    }
 
 
 async def test_deactivate_keeps_the_stream_warm(aiohttp_client, tmp_path) -> None:
@@ -297,6 +332,7 @@ async def test_deactivate_keeps_the_stream_warm(aiohttp_client, tmp_path) -> Non
     await client.put("/api/u1/groups/200", json={"stream": {"active": False}})
     assert engine.started == ["u1"]
     assert engine.stopped == 0  # not torn down on deactivate
+    assert engine.released == ["u1"]
 
 
 async def test_non_dict_stream_body_does_not_500(aiohttp_client, tmp_path) -> None:

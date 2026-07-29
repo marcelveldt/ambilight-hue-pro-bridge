@@ -62,8 +62,9 @@
   <p class="muted">
     Each paired TV controls one <em>entertainment area</em> from your Hue bridge — just the set of
     lights it drives (positions set in the Hue app are ignored; the TV places them itself). Tick
-    <em>split gradient zones</em> to expose each zone of a gradient strip as its own light. Only
-    one TV streams at a time.
+    <em>split gradient zones</em> to expose each zone of a gradient strip as its own light.
+    Enable or disable forwarding per TV and use priority to decide which TV gets the single Hue
+    streaming slot (a higher number wins).
   </p>
   <div id="tvs"><p class="muted">No TVs paired yet — add this bridge from the TV's Ambilight+Hue menu.</p></div>
 </main>
@@ -181,7 +182,9 @@ function renderTv(tv, areas) {
   card.className = "card";
   const badge = tv.streaming
     ? '<span class="badge on">● streaming</span>'
-    : '<span class="badge">idle</span>';
+    : tv.enabled
+      ? '<span class="badge">idle</span>'
+      : '<span class="badge">disabled</span>';
   const opts = ['<option value="">— not assigned (no lights) —</option>'].concat(
     areas.map((a) =>
       `<option value="${a.id}"${a.id === tv.entertainment_area ? " selected" : ""}>`
@@ -195,6 +198,13 @@ function renderTv(tv, areas) {
     `<div class="row"><strong>${tv.devicetype || "TV"}</strong>`
     + `<span class="muted">${tv.created ? "paired " + tv.created : ""}</span>`
     + `<span class="spacer"></span>${badge}<button data-del>Remove</button></div>`
+    + `<div class="row" style="margin-top:.6rem">`
+    + `<label class="badge"><input type="checkbox" data-enabled${tv.enabled ? " checked" : ""}/>`
+    + ` enabled</label><span class="muted">Stream priority</span>`
+    + `<input data-priority type="number" min="0" max="100" step="1" `
+    + `value="${Number(tv.stream_priority ?? 0)}" style="width:4.5rem"/>`
+    + `<span class="muted" style="font-size:.85rem">Higher wins; the current TV wins a tie.</span>`
+    + `</div>`
     + `<div class="row" style="margin-top:.6rem"><span class="muted">Controls area</span>`
     + `<select data-area>${opts}</select>`
     + `<label class="badge"><input type="checkbox" data-split${tv.split_gradients ? " checked" : ""}/>`
@@ -209,6 +219,8 @@ function renderTv(tv, areas) {
     + `<span class="error" data-err></span>`;
   const sel = card.querySelector("[data-area]");
   const split = card.querySelector("[data-split]");
+  const enabled = card.querySelector("[data-enabled]");
+  const priority = card.querySelector("[data-priority]");
   const smoothEl = card.querySelector("[data-smooth]");
   const smoothVal = card.querySelector("[data-smooth-val]");
   const err = card.querySelector("[data-err]");
@@ -226,6 +238,15 @@ function renderTv(tv, areas) {
   };
   sel.onchange = save;
   split.onchange = save;
+  const savePolicy = async () => {
+    err.textContent = "";
+    try {
+      await put({ enabled: enabled.checked, stream_priority: Number(priority.value) });
+      await loadTvs();
+    } catch (e) { err.textContent = String(e.message || e); }
+  };
+  enabled.onchange = savePolicy;
+  priority.onchange = savePolicy;
   let smoothTimer = null;
   smoothEl.oninput = () => {
     const v = Number(smoothEl.value);
