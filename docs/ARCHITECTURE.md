@@ -301,7 +301,10 @@ Goal: **when no TV is driving lights, the process is a few idle sockets at ~0% C
 2. **Inbound DTLS server.** Enabled by default (`enable_inbound_dtls: true`) and started at
    boot — it's an idle listening socket until a newer TV streams in; the lazy part is the
    *outbound* stream (above), not this listener. Set the flag false for a pure older-TV setup.
-   Pure-Python DTLS, so none of diyHue's "openssl subprocess always running" anti-pattern.
+   Handshake and encryption state is isolated per TV UDP endpoint, so a lower-priority TV can
+   remain authenticated without disrupting the current owner; the engine still arbitrates the
+   single outbound slot. Pure-Python DTLS, so none of diyHue's "openssl subprocess always
+   running" anti-pattern.
 3. **Always-on but cheap:** SSDP socket, mDNS, `/description.xml` + v1 REST server, web UI.
    A connected TV polls `GET /lights /groups /config /sensors` heavily — serve from
    in-memory state, no real-bridge I/O for reads.

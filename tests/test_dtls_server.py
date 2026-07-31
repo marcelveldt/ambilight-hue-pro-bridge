@@ -16,6 +16,18 @@ from ambilight_hue_bridge.emulator.huestream import decode_huestream
 
 _CLIENT_KEY = "00112233445566778899AABBCCDDEEFF"
 _USERNAME = "test-user"
+_SECOND_CLIENT_KEY = "FFEEDDCCBBAA99887766554433221100"
+_SECOND_USERNAME = "second-user"
+
+
+async def _wait_for_identity(received: list[tuple[str, bytes]], identity: str) -> None:
+    """Wait until a decrypted frame from one DTLS identity arrives."""
+    for _ in range(100):
+        if any(received_identity == identity for received_identity, _payload in received):
+            return
+        await asyncio.sleep(0.02)
+    msg = f"server did not receive a frame from {identity}"
+    raise AssertionError(msg)
 
 
 def test_inbound_recv_error_keeps_listening(monkeypatch) -> None:
@@ -99,4 +111,63 @@ async def test_server_handshakes_with_lib_client() -> None:
         assert frame.colors[0].rgb[0] > 0
     finally:
         await loop.run_in_executor(None, streamer.disconnect)
+        await server.stop()
+
+
+async def test_server_keeps_client_sessions_isolated() -> None:
+    """A second TV handshake must not invalidate the first TV's established session."""
+    loop = asyncio.get_running_loop()
+    received: list[tuple[str, bytes]] = []
+    client_keys = {
+        _USERNAME: _CLIENT_KEY,
+        _SECOND_USERNAME: _SECOND_CLIENT_KEY,
+    }
+
+    def psk(identity: str) -> bytes | None:
+        """Return the PSK for either test TV."""
+        client_key = client_keys.get(identity)
+        return bytes.fromhex(client_key) if client_key is not None else None
+
+    server = HueDtlsServer(
+        psk_provider=psk,
+        on_frame=lambda identity, data: received.append((identity, data)),
+        loop=loop,
+        host="127.0.0.1",
+        port=2100,
+    )
+    first = HueDtlsStreamer()
+    second = HueDtlsStreamer()
+    area = str(uuid.UUID(int=0))
+    command = [LightColorCommand(channel_id=0, red=65535, green=0, blue=0)]
+    await server.start()
+    try:
+        await loop.run_in_executor(
+            None,
+            first.connect,
+            "127.0.0.1",
+            _USERNAME,
+            _CLIENT_KEY,
+            area,
+        )
+        first.send_colors(command)
+        await _wait_for_identity(received, _USERNAME)
+
+        received.clear()
+        await loop.run_in_executor(
+            None,
+            second.connect,
+            "127.0.0.1",
+            _SECOND_USERNAME,
+            _SECOND_CLIENT_KEY,
+            area,
+        )
+        second.send_colors(command)
+        await _wait_for_identity(received, _SECOND_USERNAME)
+
+        received.clear()
+        first.send_colors(command)
+        await _wait_for_identity(received, _USERNAME)
+    finally:
+        await loop.run_in_executor(None, second.disconnect)
+        await loop.run_in_executor(None, first.disconnect)
         await server.stop()
