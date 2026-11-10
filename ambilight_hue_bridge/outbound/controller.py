@@ -12,7 +12,7 @@ from ambilight_hue_bridge.const import PAIR_DEVICE_TYPE
 if TYPE_CHECKING:
     from hue_entertainment import EntertainmentArea
 
-    from ambilight_hue_bridge.config.models import PairedUser
+    from ambilight_hue_bridge.config.models import PairedUser, ZigbeeLightRef
     from ambilight_hue_bridge.config.store import ConfigStore
 
 # Hue v1 light names are capped at 32 chars; longer names are rejected and some TVs then show
@@ -171,6 +171,22 @@ def lights_from_area(area: Any, *, split_gradients: bool = True) -> list[Virtual
             ),
         )
     return lights
+
+
+def lights_from_zigbee(lamps: list[ZigbeeLightRef]) -> list[VirtualLight]:
+    """
+    Build the virtual lights a Zigbee-target TV sees: one per selected lamp, in order.
+
+    :param lamps: The TV's selected ZHA lamps; each lamp's index is its channel id.
+    """
+    return [
+        VirtualLight(
+            id=str(index + 1),
+            name=_fit_name(lamp.name or f"Light {index + 1}"),
+            channels=[index],
+        )
+        for index, lamp in enumerate(lamps)
+    ]
 
 
 def _upsert_bridge(store: ConfigStore, host: str, credentials: dict[str, str]) -> RealBridge:

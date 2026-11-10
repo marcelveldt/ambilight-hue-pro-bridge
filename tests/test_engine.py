@@ -7,12 +7,20 @@ import time
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
-from ambilight_hue_bridge.config.models import PairedUser, RealBridge, VirtualLight
+from ambilight_hue_bridge.config.models import (
+    PairedUser,
+    RealBridge,
+    StreamTarget,
+    VirtualLight,
+    ZigbeeLightRef,
+)
 from ambilight_hue_bridge.config.store import ConfigStore
 from ambilight_hue_bridge.engine.engine import Engine
 from ambilight_hue_bridge.engine.ingest import ColorBuffer
 from ambilight_hue_bridge.engine.mapping import map_to_commands
-from ambilight_hue_bridge.outbound.backend import BackendHealth, HueBridgeBackend
+from ambilight_hue_bridge.outbound.backend import BackendHealth, HueBridgeBackend, ZigbeeBackend
+from ambilight_hue_bridge.outbound.controller import lights_from_zigbee
+from ambilight_hue_bridge.outbound.homeassistant import ZhaLight
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -592,7 +600,7 @@ async def _stream_with_health(
     tmp_path: Path, monkeypatch, script: list[BackendHealth | Exception]
 ) -> tuple[Engine, _ScriptedBackend]:
     backend = _ScriptedBackend(script)
-    monkeypatch.setattr(Engine, "_create_backend", lambda _self, _bridge, _area: backend)
+    monkeypatch.setattr(Engine, "_create_backend", lambda _self, _user: (backend, "scripted"))
     monkeypatch.setattr("ambilight_hue_bridge.engine.engine._HEALTH_POLL_S", 0.02)
     engine = Engine(_configured_store(tmp_path), rate_hz=100)
     engine.submit_color("tv1", "1", (65535, 0, 0))
@@ -651,3 +659,120 @@ async def test_stop_during_cancellable_connect_closes_session(tmp_path: Path, mo
     await engine.stop()
     assert not engine.is_streaming
     assert closed  # the orphaned mid-connect session was closed, not leaked
+
+
+class _FakeHomeAssistant:
+    """Stand-in for HomeAssistantClient: a configured connection with one Ziggurat lamp."""
+
+    def __init__(self, *, available: bool = True) -> None:
+        self.available = available
+
+    async def ziggurat_url(self) -> str:
+        return "ws://core-ziggurat:9999"
+
+    async def hue_lights(self) -> list[ZhaLight]:
+        return [ZhaLight(ieee="00:17:88:01:00:00:00:01", nwk=0x1111, name="Lamp")]
+
+
+class _FakeZigbeeSession:
+    """Stand-in for ZigbeeEntertainmentSession that records sent frames (no real I/O)."""
+
+    def __init__(self, url: str, lights: list[object], *, idle_timeout: float) -> None:
+        self.url = url
+        self.lights = lights
+        self.idle_timeout = idle_timeout
+        self.streaming = False
+        self.closed = False
+        self.frames: list[object] = []
+
+    @property
+    def is_streaming(self) -> bool:
+        return self.streaming
+
+    async def start(self) -> None:
+        self.streaming = True
+
+    def send(self, commands: object) -> None:
+        self.frames.append(commands)
+
+    async def aclose(self) -> None:
+        self.streaming = False
+        self.closed = True
+
+
+def _zigbee_store(tmp_path: Path) -> ConfigStore:
+    """Build a store with one Zigbee-target TV and no Hue bridge at all."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    lamps = [ZigbeeLightRef(ieee="00:17:88:01:00:00:00:01", name="Lamp")]
+    store.config.users = [
+        PairedUser(
+            username="tv1",
+            clientkey="k",
+            devicetype="TV",
+            created="2026-11-10",
+            target=StreamTarget.ZIGBEE,
+            zigbee_lights=lamps,
+            lights=lights_from_zigbee(lamps),
+        ),
+    ]
+    return store
+
+
+async def test_zigbee_tv_streams_without_a_hue_bridge(tmp_path: Path, monkeypatch) -> None:
+    """A Zigbee-target TV streams through the Zigbee backend with no Hue bridge configured."""
+    created: list[_FakeZigbeeSession] = []
+
+    def factory(*args: object, **kwargs: object) -> _FakeZigbeeSession:
+        session = _FakeZigbeeSession(*args, **kwargs)  # type: ignore[arg-type]
+        created.append(session)
+        return session
+
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.ZigbeeEntertainmentSession", factory)
+    engine = Engine(
+        _zigbee_store(tmp_path),
+        rate_hz=100,
+        home_assistant=_FakeHomeAssistant(),  # type: ignore[arg-type]
+    )
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    assert await _wait_until(lambda: bool(created) and bool(created[0].frames))
+    assert isinstance(engine._backend, ZigbeeBackend)
+    assert engine.stream_owner == "tv1"
+    first_frame = created[0].frames[0]
+    assert isinstance(first_frame, list)
+    assert first_frame[0].channel_id == 0
+    assert first_frame[0].red == 65535
+    await engine.stop()
+    assert created[0].closed
+
+
+def test_zigbee_tv_readiness_needs_lamps_and_home_assistant(tmp_path: Path) -> None:
+    """A Zigbee TV is ready when enabled with lamps and a Home Assistant connection."""
+    store = _zigbee_store(tmp_path)
+    home_assistant = _FakeHomeAssistant()
+    engine = Engine(store, home_assistant=home_assistant)  # type: ignore[arg-type]
+    assert engine._owner_ready("tv1")
+    home_assistant.available = False
+    assert not engine._owner_ready("tv1")
+    home_assistant.available = True
+    store.config.users[0].zigbee_lights = []
+    assert not engine._owner_ready("tv1")
+
+
+def test_create_backend_follows_the_tv_target(tmp_path: Path, monkeypatch) -> None:
+    """A Hue-target TV gets the Hue bridge backend, a Zigbee-target TV the Zigbee backend."""
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", _FakeSession)
+    store = _configured_store(tmp_path)
+    engine = Engine(store, home_assistant=_FakeHomeAssistant())  # type: ignore[arg-type]
+    user = store.config.users[0]
+    created = engine._create_backend(user)
+    assert created is not None
+    assert isinstance(created[0], HueBridgeBackend)
+    assert created[1] == "1.2.3.4 area area-1"
+    user.target = StreamTarget.ZIGBEE
+    user.zigbee_lights = [ZigbeeLightRef(ieee="00:17:88:01:00:00:00:01", name="Lamp")]
+    store.config.real_bridges = []
+    created = engine._create_backend(user)
+    assert created is not None
+    assert isinstance(created[0], ZigbeeBackend)
+    assert created[1] == "1 Zigbee lamp(s)"

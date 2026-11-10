@@ -11,15 +11,22 @@ import aiohttp
 from aiohttp import web
 from hue_entertainment import discover_bridges
 
-from ambilight_hue_bridge.config.models import CachedArea, CachedChannel
-from ambilight_hue_bridge.const import MAX_STREAM_SMOOTHING
+from ambilight_hue_bridge.config.models import (
+    CachedArea,
+    CachedChannel,
+    StreamTarget,
+    ZigbeeLightRef,
+)
+from ambilight_hue_bridge.const import MAX_STREAM_SMOOTHING, MAX_ZIGBEE_LIGHTS
 from ambilight_hue_bridge.identity import bridge_id
 from ambilight_hue_bridge.outbound.controller import (
     active_bridge,
     lights_from_area,
+    lights_from_zigbee,
     list_areas,
     pair_and_store,
 )
+from ambilight_hue_bridge.outbound.homeassistant import HomeAssistantClient, HomeAssistantError
 
 if TYPE_CHECKING:
     from ambilight_hue_bridge.config.models import PairedUser, RealBridge
@@ -48,6 +55,7 @@ class WebServer:
         mac: str,
         host_ip: str,
         http_port: int,
+        home_assistant: HomeAssistantClient | None = None,
     ) -> None:
         """
         Initialize the web server.
@@ -57,9 +65,13 @@ class WebServer:
         :param mac: Resolved host MAC, for the displayed bridge id.
         :param host_ip: LAN IP shown in the UI.
         :param http_port: TCP port the bridge is served on, shown in the UI.
+        :param home_assistant: Client listing the ZHA lamps (defaults to one on ``store``).
         """
         self._store = store
         self._engine = engine
+        self._home_assistant = (
+            home_assistant if home_assistant is not None else HomeAssistantClient(store)
+        )
         self._mac = mac
         self._host_ip = host_ip
         self._http_port = http_port
@@ -78,6 +90,9 @@ class WebServer:
                 web.put("/cfg/tvs/{username}", self._handle_assign_tv),
                 web.delete("/cfg/tvs/{username}", self._handle_delete_tv),
                 web.get("/cfg/areas", self._handle_areas_list),
+                web.get("/cfg/zigbee/lights", self._handle_zigbee_lights),
+                web.get("/cfg/homeassistant", self._handle_home_assistant),
+                web.put("/cfg/homeassistant", self._handle_update_home_assistant),
                 web.get("/cfg/discover", self._handle_discover),
                 web.get("/cfg/bridges", self._handle_bridges),
                 web.post("/cfg/bridges/pair", self._handle_pair),
@@ -127,7 +142,7 @@ class WebServer:
         return web.json_response(self._tv_dict(user, owner))
 
     async def _handle_assign_tv(self, request: web.Request) -> web.StreamResponse:
-        """Update a TV's assignment, smoothing, enabled state, or stream priority."""
+        """Update a TV's target, assignment, smoothing, enabled state, or stream priority."""
         username = request.match_info["username"]
         user = self._tv_by_username(username)
         if user is None:
@@ -156,9 +171,38 @@ class WebServer:
                     },
                     status=400,
                 )
-        # Only rebuild the lights when the area/split actually change - a smoothing-only edit
-        # must not re-fetch the area and renumber lights the TV has already been assigned.
+        target_update: StreamTarget | None = None
+        lamps_update: list[ZigbeeLightRef] | None = None
+        if "target" in body:
+            try:
+                target_update = StreamTarget(body["target"])
+            except ValueError:
+                return web.json_response(
+                    {"error": "target must be 'hue' or 'zigbee'."},
+                    status=400,
+                )
+        if "zigbee_lights" in body:
+            lamps_update = _parse_zigbee_lights(body["zigbee_lights"])
+            if lamps_update is None:
+                return web.json_response(
+                    {
+                        "error": (
+                            f"zigbee_lights must be a list of up to {MAX_ZIGBEE_LIGHTS} lamps, "
+                            "each with an ieee."
+                        )
+                    },
+                    status=400,
+                )
+        # Only rebuild the lights when the target, area/split or lamps actually change - a
+        # smoothing-only edit must not re-fetch the area and renumber lights the TV has already
+        # been assigned.
         rebuild = False
+        if target_update is not None:
+            user.target = target_update
+            rebuild = True
+        if lamps_update is not None:
+            user.zigbee_lights = lamps_update
+            rebuild = True
         if "entertainment_area" in body:
             user.entertainment_area = str(body["entertainment_area"])
             rebuild = True
@@ -176,13 +220,7 @@ class WebServer:
         if priority_update is not None:
             user.stream_priority = priority_update
         if rebuild:
-            if user.entertainment_area:
-                area = await self._area_by_id(user.entertainment_area)
-                user.lights = (
-                    lights_from_area(area, split_gradients=user.split_gradients) if area else []
-                )
-            else:
-                user.lights = []
+            await self._rebuild_lights(user)
         self._store.save()
         if (policy_changed or rebuild) and self._engine is not None:
             self._engine.tv_settings_changed(username)
@@ -231,6 +269,31 @@ class WebServer:
         bridge.cached_areas = _areas_to_cache(areas)
         self._store.save()
         return areas
+
+    async def _handle_zigbee_lights(self, _request: web.Request) -> web.StreamResponse:
+        """List the Hue color lights in ZHA a TV can stream to directly, or why there are none."""
+        try:
+            url = await self._home_assistant.ziggurat_url()
+            lights = await self._home_assistant.hue_lights() if url else []
+        except HomeAssistantError as err:
+            return web.json_response({"available": False, "reason": str(err), "lights": []})
+        if url is None:
+            reason = "ZHA in Home Assistant does not run on a Ziggurat radio"
+            return web.json_response({"available": False, "reason": reason, "lights": []})
+        return web.json_response(
+            {
+                "available": True,
+                "lights": [
+                    {
+                        "ieee": light.ieee,
+                        "name": light.name,
+                        "area": light.area,
+                        "model": light.model,
+                    }
+                    for light in lights
+                ],
+            },
+        )
 
     async def _handle_discover(self, _request: web.Request) -> web.StreamResponse:
         """Discover Hue bridges on the local network via mDNS."""
@@ -282,6 +345,30 @@ class WebServer:
         self._store.save()
         return web.json_response({"deleted": target})
 
+    async def _handle_home_assistant(self, _request: web.Request) -> web.StreamResponse:
+        """Return the Home Assistant connection settings (never the token)."""
+        return web.json_response(self._home_assistant_dict())
+
+    async def _handle_update_home_assistant(self, request: web.Request) -> web.StreamResponse:
+        """Set the manual Home Assistant URL and/or token; an empty URL disconnects."""
+        body = await _read_json(request)
+        settings = self._store.config.home_assistant
+        if "url" in body:
+            url = str(body["url"] or "").strip()
+            if url and not url.startswith(("http://", "https://", "ws://", "wss://")):
+                return web.json_response(
+                    {"error": "The URL must start with http:// or https://."},
+                    status=400,
+                )
+            settings.url = url
+        token = body.get("token")
+        if isinstance(token, str) and token.strip():
+            settings.token = token.strip()
+        if not settings.url:
+            settings.token = ""
+        self._store.save()
+        return web.json_response(self._home_assistant_dict())
+
     def _tv_dict(self, user: PairedUser, owner: str | None) -> dict[str, Any]:
         """Build the JSON representation of a paired TV (with its assignment) for the UI."""
         return {
@@ -291,15 +378,41 @@ class WebServer:
             "streaming": user.username == owner,
             "enabled": user.enabled,
             "stream_priority": user.stream_priority,
+            "target": user.target.value,
             "entertainment_area": user.entertainment_area,
             "split_gradients": user.split_gradients,
+            "zigbee_lights": [
+                {"ieee": lamp.ieee, "name": lamp.name} for lamp in user.zigbee_lights
+            ],
             "stream_smoothing": user.stream_smoothing if user.stream_smoothing is not None else 0.0,
             "lights": [light.name for light in user.lights],
         }
 
+    async def _rebuild_lights(self, user: PairedUser) -> None:
+        """Rebuild the virtual lights a TV sees from its selected lamps or assigned area."""
+        if user.target is StreamTarget.ZIGBEE:
+            user.lights = lights_from_zigbee(user.zigbee_lights)
+        elif user.entertainment_area:
+            area = await self._area_by_id(user.entertainment_area)
+            user.lights = (
+                lights_from_area(area, split_gradients=user.split_gradients) if area else []
+            )
+        else:
+            user.lights = []
+
     async def _area_by_id(self, area_id: str) -> Any:
         """Return the active bridge's entertainment area with the given id (live or cached)."""
         return next((area for area in await self._list_areas() if area.id == area_id), None)
+
+    def _home_assistant_dict(self) -> dict[str, Any]:
+        """Build the JSON representation of the Home Assistant connection (without the token)."""
+        settings = self._store.config.home_assistant
+        return {
+            "addon": self._home_assistant.is_addon,
+            "available": self._home_assistant.available,
+            "url": settings.url,
+            "token_set": bool(settings.token),
+        }
 
     def _bridge_dict(self, bridge: RealBridge) -> dict[str, Any]:
         """Build the JSON representation of a real bridge for the UI."""
@@ -333,6 +446,20 @@ async def _read_json(request: web.Request) -> dict[str, Any]:
     except ValueError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _parse_zigbee_lights(value: Any) -> list[ZigbeeLightRef] | None:
+    """Parse a TV's selected lamps from a request body; None when malformed or too many."""
+    if not isinstance(value, list):
+        return None
+    lamps: dict[str, ZigbeeLightRef] = {}
+    for item in value:
+        ieee = item.get("ieee") if isinstance(item, dict) else None
+        if not isinstance(ieee, str) or not ieee.strip():
+            return None
+        ieee = ieee.strip().lower()
+        lamps.setdefault(ieee, ZigbeeLightRef(ieee=ieee, name=str(item.get("name") or "")))
+    return list(lamps.values()) if len(lamps) <= MAX_ZIGBEE_LIGHTS else None
 
 
 def _areas_to_cache(areas: list[Any]) -> list[CachedArea]:

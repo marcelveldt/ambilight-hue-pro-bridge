@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
-import pytest
+import logging
+from typing import TYPE_CHECKING
 
-from ambilight_hue_bridge.config.models import RealBridge
-from ambilight_hue_bridge.outbound.backend import BackendHealth, HueBridgeBackend
+import pytest
+from hue_entertainment import LightColorCommand
+
+from ambilight_hue_bridge.config.models import RealBridge, ZigbeeLightRef
+from ambilight_hue_bridge.outbound.backend import BackendHealth, HueBridgeBackend, ZigbeeBackend
+from ambilight_hue_bridge.outbound.homeassistant import HomeAssistantError, ZhaLight
+
+if TYPE_CHECKING:
+    from hue_entertainment import ZigbeeLight
 
 
 class _FakeSession:
@@ -114,3 +122,125 @@ async def test_check_health_transient_error_raises(monkeypatch: pytest.MonkeyPat
     with pytest.raises(OSError, match="timeout"):
         await backend.check_health()
     assert not backend._streamer_rid_captured
+
+
+class _FakeHomeAssistant:
+    """Stand-in for HomeAssistantClient with a fixed Ziggurat URL and ZHA lamps."""
+
+    def __init__(self, url: str | None, lights: list[ZhaLight]) -> None:
+        self.url = url
+        self.lights = lights
+
+    async def ziggurat_url(self) -> str | None:
+        return self.url
+
+    async def hue_lights(self) -> list[ZhaLight]:
+        return self.lights
+
+
+class _FakeZigbeeSession:
+    """Stand-in for ZigbeeEntertainmentSession that records its lights and frames."""
+
+    def __init__(self, url: str, lights: list[ZigbeeLight], *, idle_timeout: float) -> None:
+        self.url = url
+        self.lights = lights
+        self.idle_timeout = idle_timeout
+        self.streaming = False
+        self.closed = False
+        self.frames: list[object] = []
+
+    @property
+    def is_streaming(self) -> bool:
+        return self.streaming
+
+    async def start(self) -> None:
+        self.streaming = True
+
+    def send(self, commands: object) -> None:
+        self.frames.append(commands)
+
+    async def aclose(self) -> None:
+        self.streaming = False
+        self.closed = True
+
+
+_LAMPS = [
+    ZigbeeLightRef(ieee="00:17:88:01:00:00:00:01", name="Left"),
+    ZigbeeLightRef(ieee="00:17:88:01:00:00:00:02", name="Gone"),
+    # Stored upper case, as a hand-edited config might.
+    ZigbeeLightRef(ieee="00:17:88:01:0C:BF:17:C8", name="Right"),
+]
+
+
+def _make_zigbee_backend(
+    monkeypatch: pytest.MonkeyPatch, url: str | None = "ws://core-ziggurat:9999"
+) -> ZigbeeBackend:
+    monkeypatch.setattr(
+        "ambilight_hue_bridge.outbound.backend.ZigbeeEntertainmentSession", _FakeZigbeeSession
+    )
+    home_assistant = _FakeHomeAssistant(
+        url,
+        [
+            # Out of order on purpose: lamps are matched by IEEE address, not position.
+            ZhaLight(ieee="00:17:88:01:0c:bf:17:c8", nwk=0x3333, name="R"),
+            ZhaLight(ieee="00:17:88:01:00:00:00:01", nwk=0x1111, name="L"),
+        ],
+    )
+    return ZigbeeBackend(home_assistant, _LAMPS)  # type: ignore[arg-type]
+
+
+def _zigbee_session(backend: ZigbeeBackend) -> _FakeZigbeeSession:
+    session = backend._session
+    assert isinstance(session, _FakeZigbeeSession)
+    return session
+
+
+async def test_zigbee_start_resolves_addresses_and_skips_missing_lamps(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Each lamp gets its current ZHA address; a lamp gone from ZHA is skipped with a warning."""
+    backend = _make_zigbee_backend(monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        await backend.start()
+    session = _zigbee_session(backend)
+    assert session.url == "ws://core-ziggurat:9999"
+    assert session.idle_timeout == 0.0
+    # Channel ids stay the lamps' configured positions, so the TV's lights keep mapping right.
+    assert [(light.channel_id, light.nwk, light.name) for light in session.lights] == [
+        (0, 0x1111, "Left"),
+        (2, 0x3333, "Right"),
+    ]
+    assert any("Gone" in record.getMessage() for record in caplog.records)
+    assert backend.is_streaming
+
+
+async def test_zigbee_start_without_any_lamp_in_zha_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When none of the lamps are in ZHA, start fails and no session is created."""
+    backend = _make_zigbee_backend(monkeypatch)
+    backend._lamps = [ZigbeeLightRef(ieee="00:17:88:01:00:00:00:02", name="Gone")]
+    with pytest.raises(HomeAssistantError, match="None of the selected Zigbee lamps"):
+        await backend.start()
+    assert backend._session is None
+    assert not backend.is_streaming
+
+
+async def test_zigbee_start_without_ziggurat_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ZHA on another radio than Ziggurat can't be streamed to."""
+    backend = _make_zigbee_backend(monkeypatch, url=None)
+    with pytest.raises(HomeAssistantError, match="Ziggurat"):
+        await backend.start()
+    assert backend._session is None
+
+
+async def test_zigbee_backend_wraps_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Frames, health and close go to the Zigbee session; health is always OK."""
+    backend = _make_zigbee_backend(monkeypatch)
+    backend.send([LightColorCommand(channel_id=0, red=1)])  # before start: dropped, no error
+    await backend.start()
+    session = _zigbee_session(backend)
+    backend.send([LightColorCommand(channel_id=0, red=1)])
+    assert len(session.frames) == 1
+    assert await backend.check_health() is BackendHealth.OK
+    await backend.aclose()
+    assert session.closed
+    assert not backend.is_streaming

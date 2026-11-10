@@ -29,6 +29,11 @@ configured from the web UI. The add-on has a few options on its **Configuration*
 - **`https`** (default `false`) — enable the optional TLS listener on 443. The tested TVs use
   plain HTTP, so leave it off unless a client needs TLS.
 
+**Zigbee lights (no Hue bridge):** if Home Assistant's ZHA runs on a Ziggurat radio, a TV can stream
+straight to up to 10 Hue colour lamps on that Zigbee network. Pick them per TV in the web UI; the
+add-on reaches Home Assistant on its own, and the lamps return to their previous state when streaming
+stops.
+
 The bridge runs with **host networking** (required for SSDP/mDNS discovery and for the virtual
 bridge to appear on the LAN), so it binds the host's `http_port`. Make sure nothing else on the
 host already uses it.

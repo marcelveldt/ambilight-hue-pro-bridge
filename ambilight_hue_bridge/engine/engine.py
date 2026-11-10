@@ -8,15 +8,17 @@ import time
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
+from ambilight_hue_bridge.config.models import StreamTarget
 from ambilight_hue_bridge.const import MAX_STREAM_SMOOTHING
-from ambilight_hue_bridge.outbound.backend import BackendHealth, HueBridgeBackend
+from ambilight_hue_bridge.outbound.backend import BackendHealth, HueBridgeBackend, ZigbeeBackend
 from ambilight_hue_bridge.outbound.controller import active_bridge, paired_user, tv_stream_target
+from ambilight_hue_bridge.outbound.homeassistant import HomeAssistantClient
 
 from .ingest import ColorBuffer
 from .mapping import map_to_commands
 
 if TYPE_CHECKING:
-    from ambilight_hue_bridge.config.models import RealBridge, VirtualLight
+    from ambilight_hue_bridge.config.models import PairedUser, VirtualLight
     from ambilight_hue_bridge.config.store import ConfigStore
     from ambilight_hue_bridge.outbound.backend import OutputBackend
 
@@ -43,14 +45,24 @@ _IDENTIFY_RGB = (65535, 65535, 65535)
 class Engine:
     """Owns the ingest buffer and the on-demand outbound entertainment stream."""
 
-    def __init__(self, store: ConfigStore, *, rate_hz: int | None = None) -> None:
+    def __init__(
+        self,
+        store: ConfigStore,
+        *,
+        rate_hz: int | None = None,
+        home_assistant: HomeAssistantClient | None = None,
+    ) -> None:
         """
         Initialize the engine (no stream until the first color is submitted).
 
         :param store: Config store providing the real bridges and virtual lights.
         :param rate_hz: Outbound frame rate in Hz (defaults to the configured rate).
+        :param home_assistant: Client for the Zigbee target (defaults to one on ``store``).
         """
         self._store = store
+        self._home_assistant = (
+            home_assistant if home_assistant is not None else HomeAssistantClient(store)
+        )
         rate = rate_hz if rate_hz is not None else store.config.virtual_bridge.stream_rate_hz
         self._interval = 1.0 / max(1, rate)
         self._buffer = ColorBuffer()
@@ -133,19 +145,29 @@ class Engine:
             and time.monotonic() >= self._regrab_block_until
         ):
             self._logged_no_stream = True
-            bridge = active_bridge(self._store)
             user = paired_user(self._store, owner)
-            area, lights = tv_stream_target(self._store, owner)
-            LOGGER.warning(
-                "Not starting outbound stream: owner=%s enabled=%s bridge=%s client_key=%s "
-                "area=%r lights=%d",
-                owner,
-                user.enabled if user is not None else None,
-                bridge.id if bridge else None,
-                bool(bridge and bridge.client_key),
-                area,
-                len(lights),
-            )
+            if user is not None and user.target is StreamTarget.ZIGBEE:
+                LOGGER.warning(
+                    "Not starting outbound stream: owner=%s enabled=%s target=zigbee "
+                    "home_assistant=%s zigbee_lights=%d",
+                    owner,
+                    user.enabled,
+                    self._home_assistant.available,
+                    len(user.zigbee_lights),
+                )
+            else:
+                bridge = active_bridge(self._store)
+                area, lights = tv_stream_target(self._store, owner)
+                LOGGER.warning(
+                    "Not starting outbound stream: owner=%s enabled=%s bridge=%s client_key=%s "
+                    "area=%r lights=%d",
+                    owner,
+                    user.enabled if user is not None else None,
+                    bridge.id if bridge else None,
+                    bool(bridge and bridge.client_key),
+                    area,
+                    len(lights),
+                )
 
     def start_stream(self, owner: str) -> bool:
         """
@@ -266,6 +288,8 @@ class Engine:
         user = paired_user(self._store, owner)
         if user is None or not user.enabled:
             return False
+        if user.target is StreamTarget.ZIGBEE:
+            return bool(user.zigbee_lights) and self._home_assistant.available
         bridge = active_bridge(self._store)
         if bridge is None or not bridge.client_key:
             return False
@@ -404,28 +428,34 @@ class Engine:
         for light_id in identified:
             self._smoothed_buffer.set_color(light_id, rgb)
 
-    def _create_backend(self, bridge: RealBridge, area: str) -> OutputBackend:
-        """Return the output backend for a TV's stream target."""
-        return HueBridgeBackend(bridge, area)
+    def _create_backend(self, user: PairedUser) -> tuple[OutputBackend, str] | None:
+        """
+        Return the output backend for a TV's stream target, with a target label for logs.
+
+        None when a Hue-target TV has no real bridge to stream to.
+        """
+        if user.target is StreamTarget.ZIGBEE:
+            lamps = user.zigbee_lights
+            return ZigbeeBackend(self._home_assistant, lamps), f"{len(lamps)} Zigbee lamp(s)"
+        bridge = active_bridge(self._store)
+        if bridge is None:
+            return None
+        area = user.entertainment_area
+        return HueBridgeBackend(bridge, area), f"{bridge.host} area {area}"
 
     async def _open_stream(self, owner: str) -> bool:
         """Open the output stream for one TV and start its ticker."""
-        bridge = active_bridge(self._store)
-        if bridge is None:
+        user = paired_user(self._store, owner)
+        created = self._create_backend(user) if user is not None else None
+        if user is None or created is None:
             if self._stream_owner == owner:
                 self._stream_owner = None
             return False
-        # The owner's assigned area + lights ("", [] when the TV is unassigned).
         gen = self._stream_gen
-        area, lights = tv_stream_target(self._store, owner)
-        backend = self._create_backend(bridge, area)
+        backend, target = created
+        lights = user.lights
         try:
-            LOGGER.info(
-                "Starting outbound stream to %s area %s (owner=%s)",
-                bridge.host,
-                area,
-                owner,
-            )
+            LOGGER.info("Starting outbound stream to %s (owner=%s)", target, owner)
             await backend.start()
         except asyncio.CancelledError:
             # stop() cancelled us mid-connect. If the cancel landed after backend.start() had
@@ -435,7 +465,7 @@ class Engine:
                 await backend.aclose()
             raise
         except Exception:
-            LOGGER.exception("Failed to start outbound stream to %s area %s", bridge.host, area)
+            LOGGER.exception("Failed to start outbound stream to %s", target)
             with suppress(Exception):
                 await backend.aclose()
             if self._stream_owner == owner:
@@ -444,9 +474,7 @@ class Engine:
         else:
             if gen != self._stream_gen:
                 LOGGER.info(
-                    "Discarding outbound stream to %s area %s: ownership changed mid-connect",
-                    bridge.host,
-                    area,
+                    "Discarding outbound stream to %s: ownership changed mid-connect", target
                 )
                 await backend.aclose()
                 if self._stream_owner == owner:
@@ -457,7 +485,7 @@ class Engine:
             self._remote_dead = False
             self._ticker = asyncio.create_task(self._run_ticker(owner))
             self._health_task = asyncio.create_task(self._run_health(owner, backend))
-            LOGGER.info("Outbound stream started to %s area %s", bridge.host, area)
+            LOGGER.info("Outbound stream started to %s", target)
             return True
 
     async def _run_ticker(self, owner: str) -> None:

@@ -6,12 +6,16 @@ import logging
 from enum import StrEnum, auto
 from typing import TYPE_CHECKING, Protocol
 
-from hue_entertainment import EntertainmentSession
+from hue_entertainment import EntertainmentSession, ZigbeeEntertainmentSession, ZigbeeLight
+
+from .homeassistant import HomeAssistantError
 
 if TYPE_CHECKING:
     from hue_entertainment import LightColorCommand
 
-    from ambilight_hue_bridge.config.models import RealBridge
+    from ambilight_hue_bridge.config.models import RealBridge, ZigbeeLightRef
+
+    from .homeassistant import HomeAssistantClient
 
 LOGGER = logging.getLogger(__name__)
 
@@ -120,3 +124,72 @@ class HueBridgeBackend:
     async def aclose(self) -> None:
         """Stop streaming, deactivate the area and release the HTTP session."""
         await self._session.aclose()
+
+
+class ZigbeeBackend:
+    """Streams straight to Zigbee lamps through ZHA's Ziggurat server, without a Hue bridge."""
+
+    def __init__(self, home_assistant: HomeAssistantClient, lamps: list[ZigbeeLightRef]) -> None:
+        """
+        Initialize the backend (no network I/O until :meth:`start`).
+
+        :param home_assistant: Client resolving the Ziggurat server and the lamps' addresses.
+        :param lamps: The lamps to stream to; each lamp's index is its channel id.
+        """
+        self._home_assistant = home_assistant
+        self._lamps = lamps
+        self._session: ZigbeeEntertainmentSession | None = None
+
+    @property
+    def is_streaming(self) -> bool:
+        """Return True while the Zigbee stream is active."""
+        return self._session is not None and self._session.is_streaming
+
+    async def start(self) -> None:
+        """
+        Look up the Ziggurat server and the lamps in ZHA, then open the stream.
+
+        Lamps that are no longer in ZHA are skipped.
+
+        :raises HomeAssistantError: When ZHA is unavailable, not on Ziggurat, or has none of the
+            lamps.
+        :raises ZigguratError: When the Ziggurat server can't be reached.
+        """
+        url = await self._home_assistant.ziggurat_url()
+        if url is None:
+            msg = "ZHA does not run on a Ziggurat server"
+            raise HomeAssistantError(msg)
+        # The network address can change (a lamp rejoining), so resolve it fresh on every start.
+        addresses = {light.ieee: light.nwk for light in await self._home_assistant.hue_lights()}
+        lights: list[ZigbeeLight] = []
+        for channel_id, lamp in enumerate(self._lamps):
+            nwk = addresses.get(lamp.ieee.lower())
+            if nwk is None:
+                LOGGER.warning(
+                    "Zigbee lamp %s (%s) not found in ZHA; skipping", lamp.name, lamp.ieee
+                )
+                continue
+            lights.append(ZigbeeLight(channel_id, lamp.ieee, nwk, lamp.name))
+        if not lights:
+            msg = "None of the selected Zigbee lamps are in ZHA"
+            raise HomeAssistantError(msg)
+        self._session = ZigbeeEntertainmentSession(url, lights, idle_timeout=0.0)
+        await self._session.start()
+
+    def send(self, commands: list[LightColorCommand]) -> None:
+        """
+        Queue one frame of lamp colors; non-blocking.
+
+        :param commands: One color command per lamp (channel) to update this frame.
+        """
+        if self._session is not None:
+            self._session.send(commands)
+
+    async def check_health(self) -> BackendHealth:
+        """Return OK: a lost Zigbee stream already shows through :attr:`is_streaming`."""
+        return BackendHealth.OK
+
+    async def aclose(self) -> None:
+        """Stop streaming and restore the lamps' state from before the stream."""
+        if self._session is not None:
+            await self._session.aclose()
