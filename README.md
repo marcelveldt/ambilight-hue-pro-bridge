@@ -104,8 +104,11 @@ UI.
 Each lamp's state is captured when streaming starts and restored when it stops. Every frame goes to
 one lamp that relays it to the others, so pick lamps within radio range of each other.
 
-A Zigbee TV streams at the same time as a TV on the Hue bridge, and as other Zigbee TVs with other
-lamps. Zigbee TVs that share a lamp take turns by stream priority.
+A Zigbee TV streams at the same time as a TV on the Hue bridge. All Zigbee streams share the
+network's airtime, so ZHA carries at most one fast stream (a TV streaming entertainment, like the
+newer Android TVs) and one slow one (an older TV that updates its colours about once a second; it
+sends 5 frames a second and the lamps fade in between). Zigbee TVs that share a lamp, or want the
+same kind of stream, take turns by stream priority.
 
 ## Features
 
@@ -163,7 +166,7 @@ directly at `http://<ha-host>:80`. See [addon/README.md](addon/README.md) for de
 
 Each TV card has an **enabled** toggle and a **stream priority** from 0 to 100. Priority settles
 which TV streams when several want the same output: the Hue bridge (one stream at a time), or Zigbee
-lamps they share. Higher values win; the current TV keeps the stream on a tie. A higher-priority
+(one fast and one slow stream, never two on the same lamp). Higher values win; the current TV keeps the stream on a tie. A higher-priority
 request closes the current entertainment session before opening the new TV's area. A disabled TV
 stays connected to the virtual bridge but cannot stream to the real bridge; enabling it starts its
 pending request unless a higher-priority TV is active on its output.

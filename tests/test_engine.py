@@ -856,10 +856,13 @@ class _FakeHomeAssistant:
 class _FakeZigbeeSession:
     """Stand-in for ZigbeeEntertainmentSession that records sent frames (no real I/O)."""
 
-    def __init__(self, url: str, lights: list[object], *, idle_timeout: float) -> None:
+    def __init__(
+        self, url: str, lights: list[object], *, idle_timeout: float, max_rate_hz: float = 25.0
+    ) -> None:
         self.url = url
         self.lights = lights
         self.idle_timeout = idle_timeout
+        self.max_rate_hz = max_rate_hz
         self.streaming = False
         self.closed = False
         self.frames: list[object] = []
@@ -954,7 +957,13 @@ def test_create_backend_follows_the_tv_target(tmp_path: Path, monkeypatch) -> No
     created = engine._create_backend(user)
     assert created is not None
     assert isinstance(created[0], ZigbeeBackend)
-    assert created[1] == "1 Zigbee lamp(s)"
+    assert created[1] == "1 Zigbee lamp(s), slow"
+    assert created[0]._max_rate_hz == 5.0
+    engine._fast_tvs.add(user.username)  # the TV streams entertainment (start_stream)
+    created = engine._create_backend(user)
+    assert created is not None
+    assert created[1] == "1 Zigbee lamp(s), fast"
+    assert created[0]._max_rate_hz == 25.0
 
 
 _LAMP_A = "00:17:88:01:00:00:00:0a"
@@ -1081,14 +1090,14 @@ async def test_hue_tvs_arbitrate_without_touching_a_zigbee_stream(
 async def test_zigbee_tvs_with_separate_lamps_stream_at_the_same_time(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Two Zigbee TVs without a shared lamp both stream, whatever their priorities."""
+    """A fast and a slow Zigbee TV without a shared lamp both stream, whatever their priorities."""
     store = _zigbee_store(tmp_path)
     store.config.users[0].stream_priority = 10
     _add_zigbee_tv(store, "tv2", [_LAMP_A])
     backends = _backends_by_tv(monkeypatch, lambda _user: _CountingBackend())
     engine = Engine(store, rate_hz=100, home_assistant=_FakeHomeAssistant())  # type: ignore[arg-type]
-    assert engine.start_stream("tv1")
-    assert engine.start_stream("tv2")
+    assert engine.start_stream("tv1")  # streams entertainment: fast
+    engine.submit_color("tv2", "1", _RED)  # only pushes REST colors: slow
     assert await _wait_until(
         lambda: all(tv in backends and backends[tv][0].frames for tv in ("tv1", "tv2"))
     )
@@ -1128,8 +1137,8 @@ async def test_zigbee_tvs_linked_by_a_new_shared_lamp_arbitrate(
     winner = _add_zigbee_tv(store, "tva", [_LAMP_B], priority=10)
     backends = _backends_by_tv(monkeypatch, lambda _user: _CountingBackend())
     engine = Engine(store, rate_hz=100, home_assistant=_FakeHomeAssistant())  # type: ignore[arg-type]
-    assert engine.start_stream("tvb")
-    assert engine.start_stream("tva")
+    engine.submit_color("tvb", "1", _RED)  # slow
+    assert engine.start_stream("tva")  # fast
     assert await _wait_until(lambda: engine.stream_owners == {"tva", "tvb"} and engine.is_streaming)
 
     # As the web UI does: update the lamps, then restart the TV and re-evaluate ownership.
@@ -1334,8 +1343,8 @@ async def test_split_group_waits_for_the_shared_lamp_restore(tmp_path: Path, mon
     _add_zigbee_tv(store, "tv2", [_LAMP_B, _LAMP_C])
     made = _lamp_backends(monkeypatch, {"tv1": 0.4})
     engine = _zigbee_engine(store)
-    engine.submit_color("tv1", "1", _RED)
-    engine.submit_color("tv2", "1", _RED)
+    engine.submit_color("tv1", "1", _RED)  # slow
+    engine.start_stream("tv2")  # fast, waits: tv1 wins their shared output
     assert await _wait_until(lambda: engine.is_streaming)
     first.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_A)]
     first.lights = lights_from_zigbee(first.zigbee_lights)
@@ -1357,8 +1366,8 @@ async def test_merged_outputs_wait_for_the_other_stream_to_close(
     winner = _add_zigbee_tv(store, "tva", [_LAMP_B], priority=10)
     made = _lamp_backends(monkeypatch, {"tvb": 0.5, "tva": 0.1})
     engine = _zigbee_engine(store)
-    assert engine.start_stream("tvb")
-    assert engine.start_stream("tva")
+    engine.submit_color("tvb", "1", _RED)  # slow
+    assert engine.start_stream("tva")  # fast
     assert await _wait_until(lambda: len(made) == 2 and all(backend.streaming for backend in made))
     winner.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_A), ZigbeeLightRef(ieee=_LAMP_B)]
     winner.lights = lights_from_zigbee(winner.zigbee_lights)
@@ -1380,8 +1389,8 @@ async def test_merge_winner_from_another_output_resumes_without_a_frame(
     loser = _add_zigbee_tv(store, "tva", [_LAMP_B])
     made = _lamp_backends(monkeypatch, {"tvb": 0.3, "tva": 0.05})
     engine = _zigbee_engine(store)
-    assert engine.start_stream("tvb")
-    assert engine.start_stream("tva")
+    assert engine.start_stream("tvb")  # fast
+    engine.submit_color("tva", "1", _RED)  # slow
     assert await _wait_until(lambda: len(made) == 2 and all(backend.streaming for backend in made))
     loser.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_A), ZigbeeLightRef(ieee=_LAMP_B)]
     loser.lights = lights_from_zigbee(loser.zigbee_lights)
@@ -1422,8 +1431,8 @@ async def test_unlinking_an_idle_tv_frees_the_waiting_tv(tmp_path: Path, monkeyp
     _add_zigbee_tv(store, "tv3", [_LAMP_A])
     made = _lamp_backends(monkeypatch, {})
     engine = _zigbee_engine(store)
-    assert engine.start_stream("tv2")
-    assert not engine.start_stream("tv3")  # waits: tv2 wins their shared output
+    assert engine.start_stream("tv2")  # fast
+    engine.submit_color("tv3", "1", _RED)  # slow, waits: tv2 wins their shared output
     assert await _wait_until(lambda: engine.stream_owners == {"tv2"} and engine.is_streaming)
     linker.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_C)]
     linker.lights = lights_from_zigbee(linker.zigbee_lights)
@@ -1442,10 +1451,93 @@ async def test_removing_a_linking_tv_frees_the_waiting_tv(tmp_path: Path, monkey
     _add_zigbee_tv(store, "tv3", [_LAMP_A])
     _lamp_backends(monkeypatch, {})
     engine = _zigbee_engine(store)
-    assert engine.start_stream("tv2")
-    assert not engine.start_stream("tv3")  # waits: tv2 wins their shared output
+    assert engine.start_stream("tv2")  # fast
+    engine.submit_color("tv3", "1", _RED)  # slow, waits: tv2 wins their shared output
     assert await _wait_until(lambda: engine.stream_owners == {"tv2"} and engine.is_streaming)
     store.config.users = [user for user in store.config.users if user.username != "tv1"]
     await engine.remove_tv("tv1")
     assert await _wait_until(lambda: engine.stream_owners == {"tv2", "tv3"})
+    await engine.stop()
+
+
+async def test_one_fast_zigbee_stream_at_a_time(tmp_path: Path, monkeypatch) -> None:
+    """Two entertainment-streaming TVs on separate Zigbee lamps take turns, not both at once."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    _add_zigbee_tv(store, "tv1", [_LAMP_A])
+    _add_zigbee_tv(store, "tv2", [_LAMP_B])
+    backends = _backends_by_tv(monkeypatch, lambda _user: _CountingBackend())
+    engine = _zigbee_engine(store)
+    assert engine.start_stream("tv1")
+    assert await _wait_until(lambda: engine.stream_owners == {"tv1"} and engine.is_streaming)
+    engine.start_stream("tv2")
+    await _pump(engine, ["tv1", "tv2"], 10)
+    assert engine.stream_owners == {"tv1"}
+    assert "tv2" not in backends
+    await engine.stop_stream("tv1")
+    await _pump(engine, ["tv2"], 15)
+    assert engine.stream_owners == {"tv2"}
+    await engine.stop()
+
+
+async def test_one_slow_zigbee_stream_at_a_time(tmp_path: Path, monkeypatch) -> None:
+    """Two REST TVs on separate Zigbee lamps do not stream at the same time either."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    _add_zigbee_tv(store, "tv1", [_LAMP_A])
+    _add_zigbee_tv(store, "tv2", [_LAMP_B])
+    backends = _backends_by_tv(monkeypatch, lambda _user: _CountingBackend())
+    engine = _zigbee_engine(store)
+    engine.submit_color("tv1", "1", _RED)
+    assert await _wait_until(lambda: engine.stream_owners == {"tv1"} and engine.is_streaming)
+    await _pump(engine, ["tv1", "tv2"], 10)
+    assert engine.stream_owners == {"tv1"}
+    assert "tv2" not in backends
+    await engine.stop()
+
+
+async def test_higher_priority_fast_tv_takes_over_the_fast_stream(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A higher-priority entertainment TV on other lamps takes the fast stream once it closed."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    low = _add_zigbee_tv(store, "low", [_LAMP_A])
+    high = _add_zigbee_tv(store, "high", [_LAMP_B], priority=10)
+    made = _lamp_backends(monkeypatch, {"low": 0.3})
+    engine = _zigbee_engine(store)
+    assert engine.start_stream("low")
+    assert await _wait_until(lambda: engine.stream_owners == {"low"} and engine.is_streaming)
+    assert engine.start_stream("high")
+    await _pump(engine, ["low", "high"], 40)
+    assert engine.stream_owners == {"high"}
+    first, second = (backend for backend in made if backend.tv in (low.username, high.username))
+    assert first.tv == "low"
+    assert first.closed_at is not None
+    assert second.tv == "high"
+    assert second.started_at is not None
+    assert second.started_at >= first.closed_at
+    assert len(made) == 2  # the outranked TV does not restart while the other one streams
+    await engine.stop()
+
+
+async def test_tv_that_starts_streaming_moves_to_the_fast_rate(tmp_path: Path, monkeypatch) -> None:
+    """A Zigbee stream started from REST colors reopens at the fast rate once the TV streams."""
+    rates: list[float] = []
+
+    class _RateBackend(_CountingBackend):
+        def __init__(self, _ha: object, _lamps: object, *, max_rate_hz: float) -> None:
+            super().__init__()
+            rates.append(max_rate_hz)
+
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.ZigbeeBackend", _RateBackend)
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    _add_zigbee_tv(store, "tv1", [_LAMP_A])
+    engine = _zigbee_engine(store)
+    engine.submit_color("tv1", "1", _RED)
+    assert await _wait_until(lambda: engine.is_streaming)
+    assert rates == [5.0]
+    assert engine.start_stream("tv1")
+    assert await _wait_until(lambda: rates == [5.0, 25.0] and engine.is_streaming)
     await engine.stop()

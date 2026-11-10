@@ -36,6 +36,15 @@ _HEALTH_FAILS_TO_RECOVER = 2
 _FOREIGN_BACKOFF_S = 60.0
 # After a failed start, wait this long before the next attempt instead of retrying on every frame.
 _START_RETRY_BACKOFF_S = 3.0
+# Zigbee airtime is shared with the whole mesh, so ZHA runs at most one fast entertainment stream
+# (a TV streaming entertainment) and one slow one (a TV pushing v1 REST colors about once a
+# second, where 5 frames/s with the lamps fading in between look the same).
+_ZIGBEE_FAST = "fast"
+_ZIGBEE_SLOW = "slow"
+_ZIGBEE_RATE_HZ = {_ZIGBEE_FAST: 25.0, _ZIGBEE_SLOW: 5.0}
+# A TV that is not streaming re-checks whether it can start at most this often; a stream that
+# closes wakes the waiting outputs right away.
+_RECHECK_S = 0.2
 # Identify ("blink this light", from the TV's Hue alert during setup): flash full white on/off
 # over the stream for a short window ("select") or a longer one ("lselect").
 _IDENTIFY_SELECT_S = 2.0
@@ -72,6 +81,11 @@ class Engine:
         self._active_owners: set[str] = set()
         self._request_order: dict[str, int] = {}
         self._next_request_order = 0
+        self._last_recheck: dict[str, float] = {}
+        # TVs that stream entertainment (newer, DTLS) rather than only pushing v1 REST colors.
+        self._fast_tvs: set[str] = set()
+        # Restarts started from synchronous calls (kept so they are not garbage collected).
+        self._background: set[asyncio.Task[None]] = set()
         # One stream slot per exclusive output (a Hue bridge, or a group of Zigbee lamps), keyed
         # by _resource_key() and created on first use. TVs on different outputs stream at once.
         self._slots: dict[str, _StreamSlot] = {}
@@ -117,6 +131,9 @@ class Engine:
             # The streaming TV's own frames: nothing to arbitrate (setting changes arrive through
             # tv_settings_changed / restart_stream).
             return
+        if now - self._last_recheck.get(owner, 0.0) < _RECHECK_S:
+            return
+        self._last_recheck[owner] = now
         slot = self._slot_for(owner)
         if slot is not None and self._preferred_owner(slot) == owner:
             self._schedule_reconcile(slot)
@@ -170,6 +187,13 @@ class Engine:
             return False
         self._last_updates[owner] = time.monotonic()
         self._remember_request(owner)
+        if owner not in self._fast_tvs:
+            self._fast_tvs.add(owner)
+            if self._owned_slot(owner) is not None and user.target is StreamTarget.ZIGBEE:
+                # Its stream so far came from REST colors: reopen it at the fast rate.
+                task = asyncio.create_task(self.restart_stream(owner))
+                self._background.add(task)
+                task.add_done_callback(self._background.discard)
         slot = self._slot_for(owner)
         if slot is None or not self._owner_ready(owner):
             return True
@@ -210,6 +234,8 @@ class Engine:
         self._last_updates.pop(owner, None)
         self._owner_buffers.pop(owner, None)
         self._identify.pop(owner, None)
+        self._fast_tvs.discard(owner)
+        self._last_recheck.pop(owner, None)
         if self._owned_slot(owner) is not None:
             await self.stop_stream(owner)
         # The removed TV may have linked other Zigbee TVs' lamps into one output.
@@ -297,7 +323,11 @@ class Engine:
 
     def _owner_ready_for(self, owner: str, slot: _StreamSlot) -> bool:
         """Return whether a TV is ready to stream and its output is the slot's."""
-        return self._key_for(owner) == slot.key and self._owner_ready(owner)
+        return (
+            self._key_for(owner) == slot.key
+            and self._owner_ready(owner)
+            and not self._outranked(owner, slot)
+        )
 
     def _preferred_owner(self, slot: _StreamSlot) -> str | None:
         """Return the slot's highest-priority active, ready TV; preserve its owner on ties."""
@@ -354,22 +384,54 @@ class Engine:
         return next((slot for slot in self._slots.values() if slot.owner == owner), None)
 
     def _held_elsewhere(self, owner: str, slot: _StreamSlot) -> bool:
-        """
-        Return whether another output still holds what a TV needs to start on this one.
+        """Return whether another output still holds what a TV needs to start on this one."""
+        return bool(self._blocking_slots(owner, slot))
 
-        That is the TV's own stream there (active, opening or still closing), or a lamp of the
-        TV that another output's stream drives or is still restoring.
+    def _blocking_slots(self, owner: str, slot: _StreamSlot) -> list[_StreamSlot]:
+        """
+        Return the other outputs holding what a TV needs to start on this one.
+
+        That is the TV's own stream there (active, opening or still closing), a lamp of the TV
+        that another output's stream drives or is still restoring, or the Zigbee capacity of
+        the TV's class (one fast and one slow stream).
         """
         lamps = _zigbee_lamps(self._store, owner)
-        return any(
-            other is not slot
+        zigbee_class = self._zigbee_class(owner)
+        return [
+            other
+            for other in self._slots.values()
+            if other is not slot
             and (
                 other.owner == owner
                 or (other.closing_owner == owner and other.is_closing)
                 or not lamps.isdisjoint(other.busy_lamps)
+                or (zigbee_class and zigbee_class in other.busy_classes)
             )
-            for other in self._slots.values()
+        ]
+
+    def _outranked(self, owner: str, slot: _StreamSlot) -> bool:
+        """Return whether a higher-priority Zigbee TV of the same class wants another output."""
+        zigbee_class = self._zigbee_class(owner)
+        if not zigbee_class:
+            return False
+        now = time.monotonic()
+        priority = self._priority(owner)
+        return any(
+            rival != owner
+            and self._priority(rival) > priority
+            and self._zigbee_class(rival) == zigbee_class
+            and now - self._last_updates.get(rival, 0.0) < IDLE_TIMEOUT_S
+            and self._owner_ready(rival)
+            and self._key_for(rival) != slot.key
+            for rival in self._active_owners
         )
+
+    def _zigbee_class(self, owner: str) -> str:
+        """Return a Zigbee-target TV's stream class (fast or slow), or "" for other TVs."""
+        user = paired_user(self._store, owner)
+        if user is None or user.target is not StreamTarget.ZIGBEE:
+            return ""
+        return _ZIGBEE_FAST if owner in self._fast_tvs else _ZIGBEE_SLOW
 
     def _schedule_reconcile_all(self, *, skip: _StreamSlot | None = None) -> None:
         """
@@ -396,12 +458,16 @@ class Engine:
             return
         if slot.is_streaming and current is not None and current == desired:
             return
-        if current is None and (
-            desired is None
-            or time.monotonic() < slot.regrab_block_until
-            or self._held_elsewhere(desired, slot)
-        ):
-            return
+        if current is None:
+            if desired is None or time.monotonic() < slot.regrab_block_until:
+                return
+            blocking = self._blocking_slots(desired, slot)
+            if blocking:
+                # The output in the way may now be streaming for an outranked TV: re-check it.
+                for other in blocking:
+                    if other.owner not in (None, desired):
+                        self._schedule_reconcile(other)
+                return
         slot.transition_task = asyncio.create_task(self._reconcile(slot))
 
     async def _reconcile(self, slot: _StreamSlot) -> None:
@@ -436,6 +502,7 @@ class Engine:
                         return
                     slot.owner = desired
                     slot.lamps = _zigbee_lamps(self._store, desired)
+                    slot.stream_class = self._zigbee_class(desired)
                 slot.buffer = self._owner_buffers.setdefault(desired, ColorBuffer())
                 started = await self._open_stream(slot, desired)
                 if started:
@@ -493,7 +560,11 @@ class Engine:
         """
         if user.target is StreamTarget.ZIGBEE:
             lamps = user.zigbee_lights
-            return ZigbeeBackend(self._home_assistant, lamps), f"{len(lamps)} Zigbee lamp(s)"
+            zigbee_class = self._zigbee_class(user.username)
+            backend = ZigbeeBackend(
+                self._home_assistant, lamps, max_rate_hz=_ZIGBEE_RATE_HZ[zigbee_class]
+            )
+            return backend, f"{len(lamps)} Zigbee lamp(s), {zigbee_class}"
         bridge = active_bridge(self._store)
         if bridge is None:
             return None
@@ -625,6 +696,7 @@ class Engine:
             slot.closing = asyncio.create_task(backend.aclose())
             slot.closing_owner = owner
             slot.closing_lamps = slot.lamps
+            slot.closing_class = slot.stream_class
         await slot.wait_for_close()
         # A TV waiting on another output for this one's TV or lamps (a target switch, a
         # regrouping) resumes now; this output itself restarts on its next frame as before.
@@ -655,6 +727,9 @@ class _StreamSlot:
         # The Zigbee lamps (IEEE) of the owning TV's stream, and of the stream still closing.
         self.lamps: frozenset[str] = frozenset()
         self.closing_lamps: frozenset[str] = frozenset()
+        # The Zigbee stream class (fast/slow) of the owning TV's stream and of the one closing.
+        self.stream_class = ""
+        self.closing_class = ""
         # True while restart_stream() replaces the transition; concurrent restarts coalesce.
         self.restarting = False
         self.ticker: asyncio.Task[None] | None = None
@@ -689,6 +764,14 @@ class _StreamSlot:
     def is_closing(self) -> bool:
         """Return True while a torn-down backend is still closing."""
         return self.closing is not None and not self.closing.done()
+
+    @property
+    def busy_classes(self) -> frozenset[str]:
+        """Return the Zigbee stream classes this output's active, opening or closing stream uses."""
+        classes = {self.stream_class} if self.owner is not None else set()
+        if self.is_closing:
+            classes.add(self.closing_class)
+        return frozenset(classes - {""})
 
     @property
     def busy_lamps(self) -> frozenset[str]:

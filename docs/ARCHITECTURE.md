@@ -306,7 +306,9 @@ Goal: **when no TV is driving lights, the process is a few idle sockets at ~0% C
    area takes the real bridge out of normal control and there's a hard concurrent-session limit, so
    a Hue bridge is one output. A Zigbee TV's lamps are their own output; Zigbee TVs that share a
    lamp (directly or through another TV) share one. TVs on different outputs stream at the same
-   time. Per output, track requests per TV, select the highest-priority enabled owner, and preempt
+   time, except that all Zigbee streams share the mesh's airtime: at most one fast Zigbee stream
+   (a TV streaming entertainment, 25 Hz) and one slow one (a v1 REST TV, 5 Hz with the lamps
+   fading between frames) run at once, and a higher-priority TV of the same kind takes over. Per output, track requests per TV, select the highest-priority enabled owner, and preempt
    only for a strictly higher priority; a failed start or a foreign takeover backs off that output
    only. Start the outbound stream **lazily** on activation or the first inbound write; **tear
    down** after an inactivity timeout. The ticker runs only while streaming, and per-TV color
@@ -392,10 +394,11 @@ and each stream start):
 A TV stores its lamps by IEEE address; `ZigbeeBackend` resolves the current network address of
 each on every stream start and skips lamps ZHA no longer has. The TV's virtual lights are one per
 lamp, with the lamp's index as its channel id. The session captures the lamps' state on start and
-restores it on close. A lost stream turns `is_streaming` false, which the engine's ticker already
-treats as a teardown, so the health check always reports OK. A Zigbee TV is ready to stream when
-it has lamps and a Home Assistant connection; no Hue bridge is involved, so it streams alongside
-the Hue bridge's TV. Zigbee TVs only compete for a stream when they share a lamp.
+restores it on close. A lost stream (e.g. ZHA restarting its Zigbee stack) is restarted in place
+by the health check, which keeps the captured state, for up to a minute before it counts as lost.
+A Zigbee TV is ready to stream when it has lamps and a Home Assistant connection; no Hue bridge is
+involved, so it streams alongside the Hue bridge's TV. Zigbee TVs compete for a stream when they
+share a lamp or want the same kind (fast or slow) of stream.
 
 The exact older-TV write shape that §1/§8 flag as uncaptured is now largely confirmed from live
 request logs of both TV generations (see the memory/protocol notes).

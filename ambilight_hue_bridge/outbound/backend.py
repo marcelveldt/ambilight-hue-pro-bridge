@@ -134,15 +134,23 @@ class HueBridgeBackend:
 class ZigbeeBackend:
     """Streams straight to Zigbee lamps through ZHA's Ziggurat server, without a Hue bridge."""
 
-    def __init__(self, home_assistant: HomeAssistantClient, lamps: list[ZigbeeLightRef]) -> None:
+    def __init__(
+        self,
+        home_assistant: HomeAssistantClient,
+        lamps: list[ZigbeeLightRef],
+        *,
+        max_rate_hz: float = 25.0,
+    ) -> None:
         """
         Initialize the backend (no network I/O until :meth:`start`).
 
         :param home_assistant: Client resolving the Ziggurat server and the lamps' addresses.
         :param lamps: The lamps to stream to; each lamp's index is its channel id.
+        :param max_rate_hz: Most frames per second to send; the lamps fade in between.
         """
         self._home_assistant = home_assistant
         self._lamps = lamps
+        self._max_rate_hz = max_rate_hz
         self._session: ZigbeeEntertainmentSession | None = None
         self._lost_since: float | None = None
 
@@ -178,7 +186,9 @@ class ZigbeeBackend:
         if not lights:
             msg = "None of the selected Zigbee lamps are in ZHA"
             raise HomeAssistantError(msg)
-        self._session = ZigbeeEntertainmentSession(url, lights, idle_timeout=0.0)
+        self._session = ZigbeeEntertainmentSession(
+            url, lights, idle_timeout=0.0, max_rate_hz=self._max_rate_hz
+        )
         await self._session.start()
 
     def send(self, commands: list[LightColorCommand]) -> None:

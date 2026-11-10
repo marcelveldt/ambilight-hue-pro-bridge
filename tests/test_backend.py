@@ -138,10 +138,13 @@ class _FakeHomeAssistant:
 class _FakeZigbeeSession:
     """Stand-in for ZigbeeEntertainmentSession that records its lights and frames."""
 
-    def __init__(self, url: str, lights: list[ZigbeeLight], *, idle_timeout: float) -> None:
+    def __init__(
+        self, url: str, lights: list[ZigbeeLight], *, idle_timeout: float, max_rate_hz: float = 25.0
+    ) -> None:
         self.url = url
         self.lights = lights
         self.idle_timeout = idle_timeout
+        self.max_rate_hz = max_rate_hz
         self.streaming = False
         self.closed = False
         self.frames: list[object] = []
