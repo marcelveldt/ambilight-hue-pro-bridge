@@ -464,10 +464,15 @@ class Engine:
 
     def _zigbee_rate(self, owner: str) -> float:
         """Return the frame rate of a Zigbee TV's stream: its lane's, capped for a REST-only TV."""
+        if owner not in self._fast_tvs:
+            return _ZIGBEE_REST_RATE_HZ
         slot = self._owned_slot(owner)
-        lane1 = slot is not None and slot.lane == 1
-        rate = _ZIGBEE_LANE1_RATE_HZ if lane1 else _ZIGBEE_LANE2_RATE_HZ
-        return rate if owner in self._fast_tvs else min(rate, _ZIGBEE_REST_RATE_HZ)
+        if slot is not None and slot.lane == 1:
+            return _ZIGBEE_LANE1_RATE_HZ
+        # A REST-only TV in lane 1 leaves the airtime for lane 2 to run at the full rate.
+        lane1 = next((s.owner for s in self._slots.values() if s.lane == 1), None)
+        rest_lane1 = lane1 is not None and lane1 not in self._fast_tvs
+        return _ZIGBEE_LANE1_RATE_HZ if rest_lane1 else _ZIGBEE_LANE2_RATE_HZ
 
     def _update_zigbee_lanes(self) -> None:
         """Give the Zigbee streams their lanes by rank and set each stream's rate to match."""

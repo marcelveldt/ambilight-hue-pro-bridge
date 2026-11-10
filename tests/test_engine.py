@@ -1685,6 +1685,27 @@ async def test_rest_tvs_stream_at_most_five_hz_in_either_lane(tmp_path: Path, mo
     await engine.stop()
 
 
+async def test_rest_tv_in_lane_one_leaves_lane_two_the_full_rate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Next to a REST-only TV in lane 1, the streaming TV keeps 25 Hz until both stream."""
+    store = _store_with_zigbee_tvs(tmp_path, ("old", _LAMP_A, 10), ("new", _LAMP_B, 0))
+    backends = _lane_backends(monkeypatch, store)
+    engine = _zigbee_engine(store)
+    assert engine.start_stream("new")
+    await _pump(engine, ["old", "new"], 15)
+    assert engine.stream_owners == {"old", "new"}
+    assert (_slot(engine, "old").lane, _slot(engine, "new").lane) == (1, 2)
+    assert backends["old"][0].rates == [5.0]
+    assert backends["new"][0].rates == [25.0]
+    assert engine.start_stream("old")
+    await _pump(engine, ["old", "new"], 10)
+    (old,), (new,) = backends["old"], backends["new"]
+    assert old.rates == [5.0, 25.0]
+    assert new.rates == [25.0, 10.0]
+    await engine.stop()
+
+
 async def test_tv_that_starts_streaming_gets_its_lane_rate_without_a_restart(
     tmp_path: Path, monkeypatch
 ) -> None:
