@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -719,6 +720,41 @@ async def test_assign_zigbee_lamps_reads_segments_of_new_lamps_only(
     assert tv["lights"] == ["Strip", "Signe"]
     assert [lamp["zones"] for lamp in tv["zigbee_lights"]] == [1, 1]
     assert [lamp.segments for lamp in store.config.users[0].zigbee_lights] == [2, 7]
+
+
+async def test_assign_zigbee_lamps_in_order_while_a_read_is_slow(
+    aiohttp_client, web_setup, monkeypatch
+) -> None:
+    """A quick second lamp edit is applied after the first, not overtaken by it."""
+    _app, store = web_setup
+    store.config.users = [
+        PairedUser(
+            username="u1",
+            clientkey="k",
+            devicetype="TV",
+            created="2026-11-10",
+            target=StreamTarget.ZIGBEE,
+        ),
+    ]
+    delays = iter([0.3, 0.05])  # the first edit's read is slower than the second's
+
+    async def slow_read(_url: str, nwks: Iterable[int]) -> dict[int, int]:
+        await asyncio.sleep(next(delays))
+        return dict.fromkeys(nwks, 1)
+
+    monkeypatch.setattr("ambilight_hue_bridge.web.server.read_segment_counts", slow_read)
+    home_assistant = _FakeHomeAssistant(addresses={_SIGNE: 0x0A, _SPOT: 0x0B})
+    client = await aiohttp_client(_zigbee_app(store, home_assistant))
+    # Tick the Signe, then the spot before the first answer arrived.
+    first = asyncio.ensure_future(
+        client.put("/cfg/tvs/u1", json={"zigbee_lights": [{"ieee": _SIGNE}]})
+    )
+    await asyncio.sleep(0.01)
+    second = asyncio.ensure_future(
+        client.put("/cfg/tvs/u1", json={"zigbee_lights": [{"ieee": _SIGNE}, {"ieee": _SPOT}]})
+    )
+    await asyncio.gather(first, second)
+    assert [lamp.ieee for lamp in store.config.users[0].zigbee_lights] == [_SIGNE, _SPOT]
 
 
 @pytest.mark.parametrize(

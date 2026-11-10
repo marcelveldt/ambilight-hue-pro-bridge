@@ -75,6 +75,7 @@ class WebServer:
             home_assistant if home_assistant is not None else HomeAssistantClient(store)
         )
         self._mac = mac
+        self._lamps_lock = asyncio.Lock()
         self._host_ip = host_ip
         self._http_port = http_port
         # Cached once so the index handler can inject the ingress <base> per request without
@@ -203,8 +204,7 @@ class WebServer:
             user.target = target_update
             rebuild = True
         if lamps_update is not None:
-            await self._set_lamp_segments(lamps_update, user.zigbee_lights)
-            user.zigbee_lights = lamps_update
+            await self._assign_lamps(user, lamps_update)
             rebuild = True
         if "entertainment_area" in body:
             user.entertainment_area = str(body["entertainment_area"])
@@ -419,6 +419,19 @@ class WebServer:
         else:
             user.lights = []
 
+    async def _assign_lamps(self, user: PairedUser, lamps: list[ZigbeeLightRef]) -> None:
+        """
+        Give a TV a new lamp selection, reading the gradient segments of newly added lamps.
+
+        :param user: The TV.
+        :param lamps: Its new lamp selection.
+        """
+        # Reading new lamps waits on the network; a quick follow-up edit must not be overtaken
+        # by an earlier one.
+        async with self._lamps_lock:
+            await self._set_lamp_segments(lamps, user.zigbee_lights)
+            user.zigbee_lights = lamps
+
     async def _set_lamp_segments(
         self, lamps: list[ZigbeeLightRef], previous: list[ZigbeeLightRef]
     ) -> None:
@@ -430,7 +443,7 @@ class WebServer:
         :param lamps: A TV's new lamp selection.
         :param previous: The TV's lamp selection before this update.
         """
-        stored = {lamp.ieee.lower(): lamp.segments for lamp in previous}
+        stored = {lamp.ieee: lamp.segments for lamp in previous}
         added: list[ZigbeeLightRef] = []
         for lamp in lamps:
             if lamp.ieee in stored:
