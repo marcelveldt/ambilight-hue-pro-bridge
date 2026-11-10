@@ -9,6 +9,7 @@ from aiohttp import web
 
 from ambilight_hue_bridge.config.models import PairedUser, VirtualLight
 from ambilight_hue_bridge.config.store import ConfigStore
+from ambilight_hue_bridge.const import VERBOSE
 from ambilight_hue_bridge.emulator.pairing import PairingManager
 from ambilight_hue_bridge.emulator.rest_v1 import HueV1Emulator, log_requests
 
@@ -376,3 +377,23 @@ async def test_group_action_fans_out_to_engine(aiohttp_client, tmp_path) -> None
     assert keys == {"/groups/0/action/on", "/groups/0/action/bri"}
     assert {light_id for _owner, light_id in engine.colors} == {"1", "2"}
     assert all(owner == "u1" for owner, _light_id in engine.colors)
+
+
+async def test_request_log_redacts_the_home_assistant_token(
+    aiohttp_client, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The Home Assistant settings body (with its access token) never reaches the log."""
+
+    async def ok(_request: web.Request) -> web.Response:
+        return web.json_response({})
+
+    app = web.Application(middlewares=[log_requests])
+    app.router.add_put("/cfg/homeassistant", ok)
+    app.router.add_put("/cfg/tvs/u1", ok)
+    client = await aiohttp_client(app)
+    caplog.set_level(VERBOSE)
+    await client.put("/cfg/homeassistant", json={"url": "http://ha:8123", "token": "s3cret"})
+    await client.put("/cfg/tvs/u1", json={"enabled": True})
+    assert "s3cret" not in caplog.text
+    assert "<redacted>" in caplog.text
+    assert '"enabled": true' in caplog.text

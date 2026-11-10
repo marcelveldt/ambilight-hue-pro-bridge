@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from enum import StrEnum, auto
 from typing import TYPE_CHECKING, Protocol
 
@@ -18,6 +19,10 @@ if TYPE_CHECKING:
     from .homeassistant import HomeAssistantClient
 
 LOGGER = logging.getLogger(__name__)
+
+# How long a lost Zigbee stream is restarted in place (e.g. while ZHA restarts its Zigbee stack)
+# before it is reported as lost. Restarting the same session keeps the lamps' captured state.
+_ZIGBEE_RECOVERY_S = 60.0
 
 
 class BackendHealth(StrEnum):
@@ -139,11 +144,12 @@ class ZigbeeBackend:
         self._home_assistant = home_assistant
         self._lamps = lamps
         self._session: ZigbeeEntertainmentSession | None = None
+        self._lost_since: float | None = None
 
     @property
     def is_streaming(self) -> bool:
-        """Return True while the Zigbee stream is active."""
-        return self._session is not None and self._session.is_streaming
+        """Return True from a successful start until closed, also while recovering a lost stream."""
+        return self._session is not None
 
     async def start(self) -> None:
         """
@@ -185,10 +191,28 @@ class ZigbeeBackend:
             self._session.send(commands)
 
     async def check_health(self) -> BackendHealth:
-        """Return OK: a lost Zigbee stream already shows through :attr:`is_streaming`."""
+        """Restart a lost stream in place; return LOST once it stayed down for too long."""
+        session = self._session
+        if session is None or session.is_streaming:
+            self._lost_since = None
+            return BackendHealth.OK
+        now = time.monotonic()
+        if self._lost_since is None:
+            self._lost_since = now
+            LOGGER.warning("Zigbee stream lost; restarting it")
+        try:
+            await session.start()
+        except Exception as err:  # noqa: BLE001 - any failure here means "still down"
+            if now - self._lost_since < _ZIGBEE_RECOVERY_S:
+                LOGGER.debug("Zigbee stream not back yet (%s)", err)
+                return BackendHealth.OK
+            return BackendHealth.LOST
+        LOGGER.info("Zigbee stream restarted")
+        self._lost_since = None
         return BackendHealth.OK
 
     async def aclose(self) -> None:
         """Stop streaming and restore the lamps' state from before the stream."""
-        if self._session is not None:
-            await self._session.aclose()
+        session, self._session = self._session, None
+        if session is not None:
+            await session.aclose()

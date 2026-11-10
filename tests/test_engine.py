@@ -631,6 +631,78 @@ async def test_health_ok_between_misses_keeps_streaming(tmp_path: Path, monkeypa
     await engine.stop()
 
 
+class _SlowBackend(_ScriptedBackend):
+    """Healthy backend whose start and close take a while, like a real one."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.frames = 0
+        self.closed = False
+
+    async def start(self) -> None:
+        await asyncio.sleep(0.1)
+        self.streaming = True
+
+    def send(self, _commands: object) -> None:
+        self.frames += 1
+
+    async def aclose(self) -> None:
+        self.streaming = False
+        await asyncio.sleep(0.2)
+        self.closed = True
+
+
+async def test_lost_stream_restarts_while_the_tv_keeps_sending(tmp_path: Path, monkeypatch) -> None:
+    """A stream that dies under a busy TV is replaced cleanly: one owner, frames flowing."""
+    backends: list[_SlowBackend] = []
+
+    def create(_self: Engine, _user: object) -> tuple[_SlowBackend, str]:
+        backends.append(_SlowBackend())
+        return backends[-1], "slow"
+
+    monkeypatch.setattr(Engine, "_create_backend", create)
+    engine = Engine(_configured_store(tmp_path), rate_hz=50)
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    assert await _wait_until(lambda: engine.is_streaming)
+    backends[0].streaming = False  # the transport dropped
+    for _ in range(40):
+        engine.submit_color("tv1", "1", (65535, 0, 0))
+        await asyncio.sleep(0.02)
+    assert engine.stream_owner == "tv1"
+    assert engine.is_streaming
+    live = [backend for backend in backends if backend.streaming]
+    assert len(live) == 1
+    assert backends[0].closed
+    frames = live[0].frames
+    await asyncio.sleep(0.1)
+    assert live[0].frames > frames
+    await engine.stop_stream("tv1")
+    assert not engine.is_streaming
+    assert live[0].closed
+
+
+async def test_restart_stream_reopens_the_active_stream(tmp_path: Path, monkeypatch) -> None:
+    """restart_stream() replaces the owner's backend so new stream settings apply now."""
+    backends: list[_SlowBackend] = []
+
+    def create(_self: Engine, _user: object) -> tuple[_SlowBackend, str]:
+        backends.append(_SlowBackend())
+        return backends[-1], "slow"
+
+    monkeypatch.setattr(Engine, "_create_backend", create)
+    engine = Engine(_configured_store(tmp_path), rate_hz=50)
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    assert await _wait_until(lambda: engine.is_streaming)
+    await engine.restart_stream("tv1")
+    assert backends[0].closed
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    assert await _wait_until(lambda: len(backends) == 2 and engine.is_streaming)
+    assert engine.stream_owner == "tv1"
+    await engine.restart_stream("someone-else")  # not the owner: nothing happens
+    assert len(backends) == 2
+    await engine.stop()
+
+
 async def test_failed_start_backs_off_before_retrying(tmp_path: Path, monkeypatch) -> None:
     """A start that fails is retried after a pause, not on every inbound frame."""
     starts: list[float] = []

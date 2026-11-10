@@ -230,5 +230,9 @@ async def _receive(websocket: aiohttp.ClientWebSocketResponse) -> dict[str, Any]
     if message.type is not aiohttp.WSMsgType.TEXT:
         msg = "Home Assistant closed the connection"
         raise HomeAssistantError(msg)
-    data = orjson.loads(message.data)
+    try:
+        data = orjson.loads(message.data)
+    except orjson.JSONDecodeError as err:
+        msg = "Unexpected response from Home Assistant; check the URL"
+        raise HomeAssistantError(msg) from err
     return data if isinstance(data, dict) else {}

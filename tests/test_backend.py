@@ -230,7 +230,7 @@ async def test_zigbee_start_without_ziggurat_raises(monkeypatch: pytest.MonkeyPa
 
 
 async def test_zigbee_backend_wraps_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Frames, health and close go to the Zigbee session; health is always OK."""
+    """Frames, health and close go to the Zigbee session."""
     backend = _make_zigbee_backend(monkeypatch)
     backend.send([LightColorCommand(channel_id=0, red=1)])  # before start: dropped, no error
     await backend.start()
@@ -241,3 +241,34 @@ async def test_zigbee_backend_wraps_the_session(monkeypatch: pytest.MonkeyPatch)
     await backend.aclose()
     assert session.closed
     assert not backend.is_streaming
+
+
+async def test_zigbee_lost_stream_restarts_the_same_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lost stream is restarted in place, so the lamps' captured state is kept."""
+    backend = _make_zigbee_backend(monkeypatch)
+    await backend.start()
+    session = _zigbee_session(backend)
+    session.streaming = False  # e.g. ZHA restarting its Zigbee stack
+    assert backend.is_streaming  # still "ours" while it recovers
+    assert await backend.check_health() is BackendHealth.OK
+    assert _zigbee_session(backend) is session
+    assert session.streaming
+
+
+async def test_zigbee_stream_down_too_long_is_lost(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stream that cannot be restarted stays OK during the recovery window, then is LOST."""
+    backend = _make_zigbee_backend(monkeypatch)
+    await backend.start()
+    session = _zigbee_session(backend)
+
+    async def still_down() -> None:
+        msg = "Ziggurat unreachable"
+        raise OSError(msg)
+
+    session.start = still_down  # type: ignore[method-assign]
+    session.streaming = False
+    assert await backend.check_health() is BackendHealth.OK
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend._ZIGBEE_RECOVERY_S", 0.0)
+    assert await backend.check_health() is BackendHealth.LOST

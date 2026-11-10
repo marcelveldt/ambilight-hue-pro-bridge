@@ -222,8 +222,7 @@ class WebServer:
         if rebuild:
             await self._rebuild_lights(user)
         self._store.save()
-        if (policy_changed or rebuild) and self._engine is not None:
-            self._engine.tv_settings_changed(username)
+        await self._notify_engine(username, rebuild=rebuild, policy_changed=policy_changed)
         owner = self._engine.stream_owner if self._engine is not None else None
         return web.json_response(self._tv_dict(user, owner))
 
@@ -357,9 +356,12 @@ class WebServer:
             url = str(body["url"] or "").strip()
             if url and not url.startswith(("http://", "https://", "ws://", "wss://")):
                 return web.json_response(
-                    {"error": "The URL must start with http:// or https://."},
+                    {"error": "The URL must start with http://, https://, ws:// or wss://."},
                     status=400,
                 )
+            if url != settings.url:
+                # The saved token only ever goes to the URL it was entered for.
+                settings.token = ""
             settings.url = url
         token = body.get("token")
         if isinstance(token, str) and token.strip():
@@ -387,6 +389,15 @@ class WebServer:
             "stream_smoothing": user.stream_smoothing if user.stream_smoothing is not None else 0.0,
             "lights": [light.name for light in user.lights],
         }
+
+    async def _notify_engine(self, username: str, *, rebuild: bool, policy_changed: bool) -> None:
+        """Tell the engine a TV's settings changed; new lights restart its active stream."""
+        if self._engine is None:
+            return
+        if rebuild:
+            await self._engine.restart_stream(username)
+        if policy_changed or rebuild:
+            self._engine.tv_settings_changed(username)
 
     async def _rebuild_lights(self, user: PairedUser) -> None:
         """Rebuild the virtual lights a TV sees from its selected lamps or assigned area."""

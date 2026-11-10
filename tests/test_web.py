@@ -32,9 +32,13 @@ class _FakePolicyEngine:
         self.stream_owner: str | None = None
         self.is_streaming = False
         self.changed: list[str] = []
+        self.restarted: list[str] = []
 
     def tv_settings_changed(self, owner: str) -> None:
         self.changed.append(owner)
+
+    async def restart_stream(self, owner: str) -> None:
+        self.restarted.append(owner)
 
     async def remove_tv(self, _owner: str) -> None:
         return
@@ -556,6 +560,7 @@ async def test_assign_zigbee_target_rebuilds_lights(aiohttp_client, web_setup, m
     assert user.target is StreamTarget.ZIGBEE
     assert [(light.id, light.channels) for light in user.lights] == [("1", [0]), ("2", [1])]
     assert engine.changed == ["u1"]
+    assert engine.restarted == ["u1"]
 
     tv = await (await client.put("/cfg/tvs/u1", json={"target": "hue"})).json()
     assert tv["target"] == "hue"
@@ -600,9 +605,14 @@ async def test_home_assistant_token_is_write_only(aiohttp_client, web_setup, mon
     }
     assert store.config.home_assistant.token == "s3cret"
 
-    # A URL-only update keeps the token; an empty URL disconnects and forgets it.
-    await client.put("/cfg/homeassistant", json={"url": "https://ha.example.com"})
+    # Re-sending the same URL keeps the token; a different URL drops it (the token is never
+    # sent to a host it was not entered for); an empty URL disconnects.
+    await client.put("/cfg/homeassistant", json={"url": "http://homeassistant.local:8123"})
     assert store.config.home_assistant.token == "s3cret"
+    await client.put("/cfg/homeassistant", json={"url": "https://ha.example.com"})
+    assert store.config.home_assistant.token == ""
+    await client.put("/cfg/homeassistant", json={"url": "https://ha.example.com", "token": "new"})
+    assert store.config.home_assistant.token == "new"
     data = await (await client.put("/cfg/homeassistant", json={"url": ""})).json()
     assert data["available"] is False
     assert store.config.home_assistant.token == ""

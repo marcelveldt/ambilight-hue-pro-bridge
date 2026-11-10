@@ -244,6 +244,15 @@ class Engine:
         await self._teardown()
         self._schedule_reconcile()
 
+    async def restart_stream(self, owner: str) -> None:
+        """Restart a TV's active stream so changed stream settings (target, lights) apply now."""
+        if self._stream_owner != owner:
+            return
+        self._stream_gen += 1
+        await self._cancel_transition()
+        await self._teardown()
+        self._schedule_reconcile()
+
     def identify(self, owner: str, light_id: str, *, sustained: bool = False) -> None:
         """
         Blink a light so the user can locate it (the TV's 'alert' during light assignment).
@@ -362,6 +371,12 @@ class Engine:
                 if desired is None:
                     return
                 if current is not None and current != desired:
+                    self._stream_gen += 1
+                    await self._teardown()
+                    continue
+                if current is not None and self._backend is not None and not self.is_streaming:
+                    # The stream died before its ticker noticed: tear it down here first, so
+                    # the restart below never races the ticker's own teardown.
                     self._stream_gen += 1
                     await self._teardown()
                     continue
@@ -524,6 +539,9 @@ class Engine:
                 await asyncio.sleep(self._interval)
         finally:
             if self._stream_owner == owner:
+                # A start already in flight for this owner must discard itself, not adopt the
+                # slot this teardown is clearing.
+                self._stream_gen += 1
                 await self._teardown()
                 LOGGER.info("Outbound stream stopped")
 
