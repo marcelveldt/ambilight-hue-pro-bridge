@@ -21,7 +21,8 @@ class BackendHealth(StrEnum):
     The remote end's view of an active output stream.
 
     ``OK``: the stream is still ours.
-    ``LOST``: the remote ended our stream. ``TAKEN_OVER``: another controller owns the target now.
+    ``LOST``: the remote ended our stream.
+    ``TAKEN_OVER``: another controller owns the target now.
     """
 
     OK = auto()
@@ -76,7 +77,6 @@ class HueBridgeBackend:
         # the bridge returns before it has named our streamer.
         self._our_streamer_rid = ""
         self._streamer_rid_captured = False
-        self._logged_no_remote_status = False
 
     @property
     def is_streaming(self) -> bool:
@@ -97,14 +97,6 @@ class HueBridgeBackend:
 
     async def check_health(self) -> BackendHealth:
         """Return whether the bridge still streams our area, ended it, or handed it to another."""
-        if not hasattr(self._session, "remote_status"):
-            if not self._logged_no_remote_status:
-                self._logged_no_remote_status = True
-                LOGGER.warning(
-                    "Installed hue-entertainment has no remote_status(); skipping stream health "
-                    "checks - update the library to enable silent-drop recovery",
-                )
-            return BackendHealth.OK
         status, rid = await self._session.remote_status()
         if status == "active" and rid and not self._streamer_rid_captured:
             # First time the bridge names our streamer: that rid is us. (A non-empty rid is
@@ -120,7 +112,9 @@ class HueBridgeBackend:
             return BackendHealth.OK
         if status == "active" and rid and rid != self._our_streamer_rid:
             return BackendHealth.TAKEN_OVER
-        LOGGER.debug("Bridge no longer streams our area (status=%r)", status or "unknown")
+        LOGGER.debug(
+            "Bridge does not report our area as streaming (status=%r)", status or "unknown"
+        )
         return BackendHealth.LOST
 
     async def aclose(self) -> None:

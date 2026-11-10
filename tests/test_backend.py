@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import logging
-
 import pytest
 
 from ambilight_hue_bridge.config.models import RealBridge
@@ -46,17 +44,8 @@ class _FakeSession:
         self.closed = True
 
 
-class _OldSession:
-    """A session from a hue-entertainment version without remote_status()."""
-
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        """Accept the construction args."""
-
-
-def _make_backend(
-    monkeypatch: pytest.MonkeyPatch, session_cls: type[object] = _FakeSession
-) -> HueBridgeBackend:
-    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", session_cls)
+def _make_backend(monkeypatch: pytest.MonkeyPatch) -> HueBridgeBackend:
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", _FakeSession)
     bridge = RealBridge(id="b", host="1.2.3.4", app_key="user", client_key="deadbeef")
     return HueBridgeBackend(bridge, "area-1")
 
@@ -125,14 +114,3 @@ async def test_check_health_transient_error_raises(monkeypatch: pytest.MonkeyPat
     with pytest.raises(OSError, match="timeout"):
         await backend.check_health()
     assert not backend._streamer_rid_captured
-
-
-async def test_check_health_skipped_without_remote_status(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """An old library without remote_status() always reports OK and warns once."""
-    backend = _make_backend(monkeypatch, _OldSession)
-    with caplog.at_level(logging.WARNING):
-        assert await backend.check_health() is BackendHealth.OK
-        assert await backend.check_health() is BackendHealth.OK
-    assert sum("no remote_status()" in record.getMessage() for record in caplog.records) == 1

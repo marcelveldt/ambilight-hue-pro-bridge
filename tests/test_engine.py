@@ -12,7 +12,7 @@ from ambilight_hue_bridge.config.store import ConfigStore
 from ambilight_hue_bridge.engine.engine import Engine
 from ambilight_hue_bridge.engine.ingest import ColorBuffer
 from ambilight_hue_bridge.engine.mapping import map_to_commands
-from ambilight_hue_bridge.outbound.backend import HueBridgeBackend
+from ambilight_hue_bridge.outbound.backend import BackendHealth, HueBridgeBackend
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -549,6 +549,78 @@ async def test_health_recovers_when_streamer_cleared(tmp_path: Path, monkeypatch
     created[0].status = ("active", "")
     assert await _wait_until(lambda: not engine.is_streaming)
     assert engine._regrab_block_until == 0.0  # a drop, not a takeover - re-grab is allowed
+    await engine.stop()
+
+
+class _ScriptedBackend:
+    """Output backend whose health checks follow a script of results and errors to raise."""
+
+    def __init__(self, script: list[BackendHealth | Exception]) -> None:
+        """Store the script; once it runs out every check reports OK."""
+        self.script = list(script)
+        self.polls = 0
+        self.streaming = False
+
+    @property
+    def is_streaming(self) -> bool:
+        """Return whether the fake stream is active."""
+        return self.streaming
+
+    async def start(self) -> None:
+        """Mark the stream active."""
+        self.streaming = True
+
+    def send(self, commands: object) -> None:
+        """Ignore frames."""
+
+    async def check_health(self) -> BackendHealth:
+        """Return (or raise) the next scripted health result."""
+        self.polls += 1
+        if not self.script:
+            return BackendHealth.OK
+        result = self.script.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def aclose(self) -> None:
+        """Mark the stream stopped."""
+        self.streaming = False
+
+
+async def _stream_with_health(
+    tmp_path: Path, monkeypatch, script: list[BackendHealth | Exception]
+) -> tuple[Engine, _ScriptedBackend]:
+    backend = _ScriptedBackend(script)
+    monkeypatch.setattr(Engine, "_create_backend", lambda _self, _bridge, _area: backend)
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine._HEALTH_POLL_S", 0.02)
+    engine = Engine(_configured_store(tmp_path), rate_hz=100)
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    assert await _wait_until(lambda: engine.is_streaming)
+    return engine, backend
+
+
+async def test_health_failed_check_between_misses_still_tears_down(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A failed health check is skipped: it neither counts as a miss nor resets the count."""
+    engine, backend = await _stream_with_health(
+        tmp_path, monkeypatch, [BackendHealth.LOST, OSError("timeout"), BackendHealth.LOST]
+    )
+    assert await _wait_until(lambda: not engine.is_streaming)
+    assert backend.polls == 3
+    await engine.stop()
+
+
+async def test_health_ok_between_misses_keeps_streaming(tmp_path: Path, monkeypatch) -> None:
+    """An OK check resets the miss count, so isolated misses never tear the stream down."""
+    engine, backend = await _stream_with_health(
+        tmp_path,
+        monkeypatch,
+        [BackendHealth.LOST, BackendHealth.OK, BackendHealth.LOST, OSError("timeout")],
+    )
+    assert await _wait_until(lambda: backend.polls >= 6)
+    assert engine.is_streaming
     await engine.stop()
 
 
