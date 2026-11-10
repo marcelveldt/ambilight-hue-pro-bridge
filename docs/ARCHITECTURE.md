@@ -186,7 +186,7 @@ ambilight_hue_bridge/
 │   ├── inbound.py          # inbound DTLS streamer: decode frames → engine.submit_color
 │   └── dtls_server.py      # inbound DTLS-PSK server on UDP 2100
 ├── engine/
-│   ├── engine.py           # on-demand outbound stream: smoothing + fixed-rate ticker
+│   ├── engine.py           # on-demand outbound streams, one per output: smoothing + ticker
 │   ├── ingest.py           # latest-state-wins color buffer; one slot per virtual light
 │   └── mapping.py          # virtual light → real entertainment channel commands
 ├── outbound/
@@ -237,7 +237,7 @@ users:                               # paired TVs; each is assigned an area in t
     devicetype: "55POS9002/12"
     created: "2026-06-10T12:00:00"
     enabled: true                    # false keeps the virtual connection but blocks outbound Hue
-    stream_priority: 0               # 0..100; higher wins the bridge's single streaming slot
+    stream_priority: 0               # 0..100; higher wins when TVs want the same output
     target: "hue"                    # "hue" (entertainment area) | "zigbee" (ZHA lamps)
     entertainment_area: "<v2 rid>"   # the real-bridge area this TV drives ("" => no lights)
     split_gradients: true            # expose each gradient zone as its own virtual light
@@ -259,11 +259,12 @@ and does not stream. A freshly paired TV is auto-assigned the active bridge's fi
 assigned area when you (re)set it in the web UI (split gradients = one virtual light per zone,
 else one per device). Temporal easing is **per TV** (`stream_smoothing`) — fast DTLS TVs want 0,
 ~1 Hz REST TVs want easing to fill the gaps. Enabled state and priority are also per TV. Disabled
-TVs may keep a pending virtual activation but never open the outbound session; a strictly higher
-priority active TV preempts the current owner, while the current owner wins ties. The advertised
-`swversion`/`apiversion`/`datastoreversion` and the bridge model id live in `const.py`; the
-HTTP/HTTPS ports are command-line options, not persisted. State fields emitted to the TV are
-strictly int-typed, and every exposed light advertises `capabilities.streaming`.
+TVs may keep a pending virtual activation but never open the outbound session; among TVs on the
+same output, a strictly higher priority active TV preempts the current owner, while the current
+owner wins ties. The advertised `swversion`/`apiversion`/`datastoreversion` and the bridge model
+id live in `const.py`; the HTTP/HTTPS ports are command-line options, not persisted. State fields
+emitted to the TV are strictly int-typed, and every exposed light advertises
+`capabilities.streaming`.
 
 ---
 
@@ -301,28 +302,35 @@ preview rather than hardcoding indices.
 
 Goal: **when no TV is driving lights, the process is a few idle sockets at ~0% CPU.**
 
-1. **Only one outbound stream, held open only while useful.** Activating an Entertainment area
-   takes the real bridge out of normal control and there's a hard concurrent-session limit.
-   Track requests per TV, select the highest-priority enabled owner, and preempt only for a
-   strictly higher priority. Start the outbound stream **lazily** on activation or the first
-   inbound write; **tear down** after an inactivity timeout. The ticker runs only while streaming,
-   and per-TV color buffers prevent a waiting TV from overwriting the owner's same-numbered lights.
+1. **One outbound stream per output, held open only while useful.** Activating an Entertainment
+   area takes the real bridge out of normal control and there's a hard concurrent-session limit, so
+   a Hue bridge is one output. A Zigbee TV's lamps are their own output; Zigbee TVs that share a
+   lamp (directly or through another TV) share one. TVs on different outputs stream at the same
+   time, except that all Zigbee streams share the mesh's airtime: at most one fast Zigbee stream
+   (a TV streaming entertainment, 25 Hz) and one slow one (a v1 REST TV, 5 Hz with the lamps
+   fading between frames) run at once, and a higher-priority TV of the same kind takes over. Per
+   output, track requests per TV, select the highest-priority enabled owner, and preempt only for
+   a strictly higher priority; a failed start or a foreign takeover backs off that output
+   only. Start the outbound stream **lazily** on activation or the first inbound write; **tear
+   down** after an inactivity timeout. The ticker runs only while streaming, and per-TV color
+   buffers prevent a waiting TV from overwriting the owner's same-numbered lights.
 2. **Inbound DTLS server.** Enabled by default (`enable_inbound_dtls: true`) and started at
    boot — it's an idle listening socket until a newer TV streams in; the lazy part is the
    *outbound* stream (above), not this listener. Set the flag false for a pure older-TV setup.
    Handshake and encryption state is isolated per TV UDP endpoint, so a lower-priority TV can
-   remain authenticated without disrupting the current owner; the engine still arbitrates the
-   single outbound slot. Pure-Python DTLS, so none of diyHue's "openssl subprocess always
-   running" anti-pattern.
+   remain authenticated without disrupting the current owner; the engine still arbitrates each
+   outbound stream. Pure-Python DTLS, so none of diyHue's "openssl subprocess always running"
+   anti-pattern.
 3. **Always-on but cheap:** SSDP socket, mDNS, `/description.xml` + v1 REST server, web UI.
    A connected TV polls `GET /lights /groups /config /sensors` heavily — serve from
    in-memory state, no real-bridge I/O for reads.
 4. **Lazy real-bridge connection;** single event loop, no thread pool (small footprint on a
    Pi / HA-OS).
 
-State machine: `IDLE → (eligible request) → STREAMING(owner) → (higher priority) → HANDOFF →
-STREAMING(new owner)`, with inactivity returning to `IDLE`. Disabled requests stay pending outside
-the outbound state machine and are reconsidered when enabled.
+State machine, per output: `IDLE → (eligible request) → STREAMING(owner) → (higher priority) →
+HANDOFF → STREAMING(new owner)`, with inactivity returning to `IDLE`. Disabled requests stay pending
+outside the outbound state machine and are reconsidered when enabled. A TV whose target moves to
+another output leaves the old one first: its new stream opens once the old backend has closed.
 
 ---
 
@@ -363,7 +371,7 @@ What's built and verified live against both Ambilight generations:
   smoothing and forwards on demand to a **V2 / Pro** bridge via the shared `hue-entertainment`
   client, with idle teardown.
 - **Engine** — per-TV light↔channel mapping, gradient-zone split, per-TV smoothing, light
-  identify (blink over the stream), and a single-active-stream guard.
+  identify (blink over the stream), and one stream per output (a Hue bridge, or a Zigbee lamp set).
 - **Web UI** — bridge pairing, per-TV area assignment + smoothing, and TV removal.
 - **Zigbee lights target** — per TV, stream straight to Hue lamps in Home Assistant's ZHA
   instead of a Hue bridge (below).
@@ -387,9 +395,11 @@ and each stream start):
 A TV stores its lamps by IEEE address; `ZigbeeBackend` resolves the current network address of
 each on every stream start and skips lamps ZHA no longer has. The TV's virtual lights are one per
 lamp, with the lamp's index as its channel id. The session captures the lamps' state on start and
-restores it on close. A lost stream turns `is_streaming` false, which the engine's ticker already
-treats as a teardown, so the health check always reports OK. A Zigbee TV is ready to stream when
-it has lamps and a Home Assistant connection; no Hue bridge is involved.
+restores it on close. A lost stream (e.g. ZHA restarting its Zigbee stack) is restarted in place
+by the health check, which keeps the captured state, for up to a minute before it counts as lost.
+A Zigbee TV is ready to stream when it has lamps and a Home Assistant connection; no Hue bridge is
+involved, so it streams alongside the Hue bridge's TV. Zigbee TVs compete for a stream when they
+share a lamp or want the same kind (fast or slow) of stream.
 
 The exact older-TV write shape that §1/§8 flag as uncaptured is now largely confirmed from live
 request logs of both TV generations (see the memory/protocol notes).

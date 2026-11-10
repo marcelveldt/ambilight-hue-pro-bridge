@@ -104,12 +104,19 @@ UI.
 Each lamp's state is captured when streaming starts and restored when it stops. Every frame goes to
 one lamp that relays it to the others, so pick lamps within radio range of each other.
 
+A Zigbee TV streams at the same time as a TV on the Hue bridge. All Zigbee streams share the
+network's airtime, so ZHA carries at most one fast stream (a TV streaming entertainment, like the
+newer Android TVs) and one slow one (an older TV that updates its colours about once a second; it
+sends 5 frames a second and the lamps fade in between). Zigbee TVs that share a lamp, or want the
+same kind of stream, take turns by stream priority.
+
 ## Features
 
 - 🪟 Web interface for configuration
 - 🧩 KISS, robust, low-resource always-on background service (cheap when idle)
 - 📺 Per-TV setup — area, smoothing, enabled state, and stream priority
-- 🔀 Priority arbitration — a higher-priority TV takes over the bridge's single streaming slot
+- 🔀 Priority arbitration — a higher-priority TV takes over a shared output (one stream per Hue
+  bridge); TVs on separate outputs stream side by side
 - 🌈 Map a gradient / multi-zone light into multiple addressable virtual lights
 - 📡 Discovered by both older (SSDP/UPnP) and newer (mDNS) Ambilight TVs
 - 🔌 Works with both the square Hue V2 bridge and the new Hue Pro bridge
@@ -157,11 +164,13 @@ directly at `http://<ha-host>:80`. See [addon/README.md](addon/README.md) for de
 
 ### Per-TV control from Home Assistant
 
-Each TV card has an **enabled** toggle and a **stream priority** from 0 to 100. Higher values win;
-the current TV keeps the stream on a tie. A higher-priority request closes the current
-entertainment session before opening the new TV's area. A disabled TV stays connected to the
-virtual bridge but cannot stream to the real bridge; enabling it starts its pending request unless
-a higher-priority TV is active.
+Each TV card has an **enabled** toggle and a **stream priority** from 0 to 100. Priority settles
+which TV streams when several want the same output: the Hue bridge (one stream at a time), or Zigbee
+(one fast and one slow stream, never two on the same lamp). Higher values win; the current TV keeps
+the stream on a tie. A higher-priority request closes the current entertainment session before
+opening the new TV's area. A disabled TV
+stays connected to the virtual bridge but cannot stream to the real bridge; enabling it starts its
+pending request unless a higher-priority TV is active on its output.
 
 The same settings have a LAN-local JSON API for a Home Assistant REST command or REST sensor:
 
@@ -255,8 +264,9 @@ Implemented and working end-to-end:
   ones, forwarded on demand to a V2 or Pro bridge over the Entertainment API via the shared
   [music-assistant/hue-entertainment](https://github.com/music-assistant/hue-entertainment) client,
   or straight to Zigbee lamps in Home Assistant's ZHA (Ziggurat).
-- **Engine** — per-TV light/area mapping, gradient-zone split, per-TV temporal smoothing, priority
-  arbitration/preemption, enablement, light identify (blink), and idle teardown.
+- **Engine** — per-TV light/area mapping, gradient-zone split, per-TV temporal smoothing, one
+  stream per output with priority arbitration/preemption, enablement, light identify (blink), and
+  idle teardown.
 - **Web UI** — bridge pairing, per-TV area assignment, smoothing, enablement/priority, and removal.
 - **Packaging** — a multi-arch (amd64/arm64) Docker image published to GHCR on every release,
   and a Home Assistant add-on wrapping it.

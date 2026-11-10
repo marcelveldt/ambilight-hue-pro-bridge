@@ -127,10 +127,10 @@ class WebServer:
         )
 
     async def _handle_tvs(self, _request: web.Request) -> web.StreamResponse:
-        """List the paired TVs, their assigned area + lights, and which one is streaming."""
-        owner = self._engine.stream_owner if self._engine is not None else None
+        """List the paired TVs, their assigned area + lights, and which ones are streaming."""
+        owners = self._engine.stream_owners if self._engine is not None else frozenset()
         return web.json_response(
-            [self._tv_dict(user, owner) for user in self._store.config.users],
+            [self._tv_dict(user, owners) for user in self._store.config.users],
         )
 
     async def _handle_tv(self, request: web.Request) -> web.StreamResponse:
@@ -138,8 +138,8 @@ class WebServer:
         user = self._tv_by_username(request.match_info["username"])
         if user is None:
             return web.json_response({"error": "Unknown TV."}, status=404)
-        owner = self._engine.stream_owner if self._engine is not None else None
-        return web.json_response(self._tv_dict(user, owner))
+        owners = self._engine.stream_owners if self._engine is not None else frozenset()
+        return web.json_response(self._tv_dict(user, owners))
 
     async def _handle_assign_tv(self, request: web.Request) -> web.StreamResponse:
         """Update a TV's target, assignment, smoothing, enabled state, or stream priority."""
@@ -223,11 +223,11 @@ class WebServer:
             await self._rebuild_lights(user)
         self._store.save()
         await self._notify_engine(username, rebuild=rebuild, policy_changed=policy_changed)
-        owner = self._engine.stream_owner if self._engine is not None else None
-        return web.json_response(self._tv_dict(user, owner))
+        owners = self._engine.stream_owners if self._engine is not None else frozenset()
+        return web.json_response(self._tv_dict(user, owners))
 
     async def _handle_delete_tv(self, request: web.Request) -> web.StreamResponse:
-        """Remove a paired TV (stopping its stream if it is the one currently streaming)."""
+        """Remove a paired TV (stopping its stream if it is streaming)."""
         username = request.match_info["username"]
         config = self._store.config
         if not any(user.username == username for user in config.users):
@@ -371,13 +371,13 @@ class WebServer:
         self._store.save()
         return web.json_response(self._home_assistant_dict())
 
-    def _tv_dict(self, user: PairedUser, owner: str | None) -> dict[str, Any]:
+    def _tv_dict(self, user: PairedUser, owners: frozenset[str]) -> dict[str, Any]:
         """Build the JSON representation of a paired TV (with its assignment) for the UI."""
         return {
             "username": user.username,
             "devicetype": user.devicetype,
             "created": user.created,
-            "streaming": user.username == owner,
+            "streaming": user.username in owners,
             "enabled": user.enabled,
             "stream_priority": user.stream_priority,
             "target": user.target.value,
