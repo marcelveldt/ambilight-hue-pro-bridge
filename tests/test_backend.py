@@ -288,6 +288,21 @@ async def test_zigbee_backend_wraps_the_session(monkeypatch: pytest.MonkeyPatch)
     assert not backend.is_streaming
 
 
+async def test_zigbee_rate_change_reaches_the_running_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new max_rate_hz opens the stream at that rate, and changes a running one in place."""
+    backend = _make_zigbee_backend(monkeypatch)
+    backend.max_rate_hz = 10.0
+    await backend.start()
+    session = _zigbee_session(backend)
+    assert session.max_rate_hz == 10.0
+    backend.max_rate_hz = 5.0
+    assert backend.max_rate_hz == 5.0
+    assert _zigbee_session(backend) is session
+    assert session.max_rate_hz == 5.0
+
+
 async def test_zigbee_lost_stream_restarts_the_same_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
