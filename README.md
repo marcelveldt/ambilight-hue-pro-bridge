@@ -106,10 +106,10 @@ Each lamp's state is captured when streaming starts and restored when it stops. 
 one lamp that relays it to the others, so pick lamps within radio range of each other.
 
 A Zigbee TV streams at the same time as a TV on the Hue bridge. All Zigbee streams share the
-network's airtime, so ZHA carries at most one fast stream (a TV streaming entertainment, like the
-newer Android TVs) and one slow one (an older TV that updates its colours about once a second; it
-sends 5 frames a second and the lamps fade in between). Zigbee TVs that share a lamp, or want the
-same kind of stream, take turns by stream priority.
+network's airtime, so ZHA carries at most two: the TV with the highest stream priority at 25 frames
+a second, the next one at a lower rate. An older TV that updates its colours about once a second
+gets at most 5 frames a second, and the lamps fade in between. A third Zigbee TV, or one that shares
+a lamp with a streaming TV, takes turns by stream priority.
 
 ## Features
 
@@ -167,8 +167,8 @@ Then install **Ambilight+Hue Pro Bridge** and open its web UI from the HA sideba
 
 Each TV card has an **enabled** toggle and a **stream priority** from 0 to 100. Priority settles
 which TV streams when several want the same output: the Hue bridge (one stream at a time), or Zigbee
-(one fast and one slow stream, never two on the same lamp). Higher values win; the current TV keeps
-the stream on a tie. A higher-priority request closes the current entertainment session before
+(two streams, the higher-priority one at the full rate; never two on the same lamp). Higher values
+win; the current TV keeps the stream on a tie. A higher-priority request closes the current entertainment session before
 opening the new TV's area. A disabled TV
 stays connected to the virtual bridge but cannot stream to the real bridge; enabling it starts its
 pending request unless a higher-priority TV is active on its output.

@@ -164,6 +164,17 @@ class ZigbeeBackend:
         """Return True from a successful start until closed, also while recovering a lost stream."""
         return self._session is not None
 
+    @property
+    def max_rate_hz(self) -> float:
+        """Return the most frames per second to send; changing it applies to a running stream."""
+        return self._max_rate_hz
+
+    @max_rate_hz.setter
+    def max_rate_hz(self, value: float) -> None:
+        self._max_rate_hz = value
+        if self._session is not None:
+            self._session.max_rate_hz = value
+
     async def start(self) -> None:
         """
         Look up the Ziggurat server and the lamps in ZHA, then open the stream.

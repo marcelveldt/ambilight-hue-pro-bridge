@@ -307,14 +307,18 @@ Goal: **when no TV is driving lights, the process is a few idle sockets at ~0% C
    area takes the real bridge out of normal control and there's a hard concurrent-session limit, so
    a Hue bridge is one output. A Zigbee TV's lamps are their own output; Zigbee TVs that share a
    lamp (directly or through another TV) share one. TVs on different outputs stream at the same
-   time, except that all Zigbee streams share the mesh's airtime: at most one fast Zigbee stream
-   (a TV streaming entertainment, 25 Hz) and one slow one (a v1 REST TV, 5 Hz with the lamps
-   fading between frames) run at once, and a higher-priority TV of the same kind takes over. Per
-   output, track requests per TV, select the highest-priority enabled owner, and preempt only for
-   a strictly higher priority; a failed start or a foreign takeover backs off that output
-   only. Start the outbound stream **lazily** on activation or the first inbound write; **tear
-   down** after an inactivity timeout. The ticker runs only while streaming, and per-TV color
-   buffers prevent a waiting TV from overwriting the owner's same-numbered lights.
+   time, except that all Zigbee streams share the mesh's airtime: at most two run at once, in two
+   lanes. Lane 1 (25 Hz) goes to the highest-ranked Zigbee stream, lane 2 (a reduced rate) to the
+   next; a v1 REST TV never gets more than 5 Hz, with the lamps fading between frames. The rank is
+   stream priority among the TVs requesting a stream (a released one ranks last), and the
+   streaming TV keeps its lane on a tie. A rank change moves streams between the lanes by changing
+   their frame rate live, without a restart; a further Zigbee TV waits until a lane frees, or
+   replaces the lowest-ranked stream when it ranks above that one. Per output, track requests per
+   TV, select the highest-priority enabled owner, and preempt only for a strictly higher priority;
+   a failed start or a foreign takeover backs off that output only. Start the outbound stream
+   **lazily** on activation or the first inbound write; **tear down** after an inactivity timeout.
+   The ticker runs only while streaming, and per-TV color buffers prevent a waiting TV from
+   overwriting the owner's same-numbered lights.
 2. **Inbound DTLS server.** Enabled by default (`enable_inbound_dtls: true`) and started at
    boot — it's an idle listening socket until a newer TV streams in; the lazy part is the
    *outbound* stream (above), not this listener. Set the flag false for a pure older-TV setup.
@@ -406,7 +410,7 @@ restores it on close. A lost stream (e.g. ZHA restarting its Zigbee stack) is re
 by the health check, which keeps the captured state, for up to a minute before it counts as lost.
 A Zigbee TV is ready to stream when it has lamps and a Home Assistant connection; no Hue bridge is
 involved, so it streams alongside the Hue bridge's TV. Zigbee TVs compete for a stream when they
-share a lamp or want the same kind (fast or slow) of stream.
+share a lamp, and for a lane when more than two want to stream (see §7).
 
 The exact older-TV write shape that §1/§8 flag as uncaptured is now largely confirmed from live
 request logs of both TV generations (see the memory/protocol notes).

@@ -954,11 +954,13 @@ def test_create_backend_follows_the_tv_target(tmp_path: Path, monkeypatch) -> No
     user.target = StreamTarget.ZIGBEE
     user.zigbee_lights = [ZigbeeLightRef(ieee="00:17:88:01:00:00:00:01", name="Lamp")]
     store.config.real_bridges = []
+    slot = _slot(engine)
+    slot.owner, slot.lane = user.username, 1  # the stream being opened, in lane 1
     created = engine._create_backend(user)
     assert created is not None
     assert isinstance(created[0], ZigbeeBackend)
-    assert created[1] == "1 Zigbee lamp(s), slow"
-    assert created[0]._max_rate_hz == 5.0
+    assert created[1] == "1 Zigbee lamp(s) at 5 Hz"  # a REST-only TV
+    assert created[0].max_rate_hz == 5.0
     assert created[0]._split_gradients is True
     user.split_gradients = False
     created = engine._create_backend(user)
@@ -968,13 +970,20 @@ def test_create_backend_follows_the_tv_target(tmp_path: Path, monkeypatch) -> No
     engine._fast_tvs.add(user.username)  # the TV streams entertainment (start_stream)
     created = engine._create_backend(user)
     assert created is not None
-    assert created[1] == "1 Zigbee lamp(s), fast"
-    assert created[0]._max_rate_hz == 25.0
+    assert isinstance(created[0], ZigbeeBackend)
+    assert created[1] == "1 Zigbee lamp(s) at 25 Hz"
+    assert created[0].max_rate_hz == 25.0
+    slot.lane = 2
+    created = engine._create_backend(user)
+    assert created is not None
+    assert isinstance(created[0], ZigbeeBackend)
+    assert created[0].max_rate_hz == 10.0
 
 
 _LAMP_A = "00:17:88:01:00:00:00:0a"
 _LAMP_B = "00:17:88:01:00:00:00:0b"
 _LAMP_C = "00:17:88:01:00:00:00:0c"
+_LAMP_D = "00:17:88:01:00:00:00:0d"
 _RED = (65535, 0, 0)
 
 
@@ -1466,88 +1475,246 @@ async def test_removing_a_linking_tv_frees_the_waiting_tv(tmp_path: Path, monkey
     await engine.stop()
 
 
-async def test_one_fast_zigbee_stream_at_a_time(tmp_path: Path, monkeypatch) -> None:
-    """Two entertainment-streaming TVs on separate Zigbee lamps take turns, not both at once."""
+class _ZigbeeLaneBackend(_ScriptedBackend):
+    """Stand-in for ZigbeeBackend that records its frame rates, start and close."""
+
+    def __init__(self, close_s: float, *, fail: bool) -> None:
+        super().__init__([])
+        self.rates: list[float] = []
+        self.close_s = close_s
+        self.fail = fail
+        self.started_at: float | None = None
+        self.closed_at: float | None = None
+
+    @property
+    def max_rate_hz(self) -> float:
+        return self.rates[-1]
+
+    @max_rate_hz.setter
+    def max_rate_hz(self, value: float) -> None:
+        self.rates.append(value)
+
+    async def start(self) -> None:
+        if self.fail:
+            msg = "lamps unreachable"
+            raise OSError(msg)
+        self.started_at = time.monotonic()
+        self.streaming = True
+
+    async def aclose(self) -> None:
+        self.streaming = False
+        await asyncio.sleep(self.close_s)
+        self.closed_at = time.monotonic()
+
+
+def _lane_backends(
+    monkeypatch,
+    store: ConfigStore,
+    *,
+    close_s: float = 0.0,
+    failing: frozenset[str] = frozenset(),
+) -> dict[str, list[_ZigbeeLaneBackend]]:
+    """Have the engine create rate-recording Zigbee backends; return them per TV."""
+    created: dict[str, list[_ZigbeeLaneBackend]] = {}
+
+    class _Backend(_ZigbeeLaneBackend):
+        def __init__(
+            self,
+            _home_assistant: object,
+            lamps: list[ZigbeeLightRef],
+            *,
+            max_rate_hz: float,
+            **_options: object,
+        ) -> None:
+            tv = next(user.username for user in store.config.users if user.zigbee_lights == lamps)
+            super().__init__(close_s, fail=tv in failing)
+            self.rates.append(max_rate_hz)
+            created.setdefault(tv, []).append(self)
+
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.ZigbeeBackend", _Backend)
+    return created
+
+
+def _store_with_zigbee_tvs(tmp_path: Path, *tvs: tuple[str, str, int]) -> ConfigStore:
+    """Return a store with a Zigbee TV per (username, lamp, priority)."""
     store = ConfigStore(tmp_path / "config.yaml")
     store.load()
-    _add_zigbee_tv(store, "tv1", [_LAMP_A])
-    _add_zigbee_tv(store, "tv2", [_LAMP_B])
-    backends = _backends_by_tv(monkeypatch, lambda _user: _CountingBackend())
+    for username, lamp, priority in tvs:
+        _add_zigbee_tv(store, username, [lamp], priority=priority)
+    return store
+
+
+async def test_two_zigbee_lanes_and_a_third_tv_waits(tmp_path: Path, monkeypatch) -> None:
+    """Two Zigbee TVs stream at 25 and 10 Hz; a third waits until a lane frees, then moves in."""
+    store = _store_with_zigbee_tvs(
+        tmp_path, ("tv1", _LAMP_A, 0), ("tv2", _LAMP_B, 0), ("tv3", _LAMP_C, 0)
+    )
+    backends = _lane_backends(monkeypatch, store)
     engine = _zigbee_engine(store)
     assert engine.start_stream("tv1")
-    assert await _wait_until(lambda: engine.stream_owners == {"tv1"} and engine.is_streaming)
-    engine.start_stream("tv2")
-    await _pump(engine, ["tv1", "tv2"], 10)
-    assert engine.stream_owners == {"tv1"}
-    assert "tv2" not in backends
+    assert await _wait_until(lambda: "tv1" in backends and engine.is_streaming)
+    assert engine.start_stream("tv2")
+    assert await _wait_until(lambda: "tv2" in backends)
+    assert engine.start_stream("tv3")  # waiting for a lane is not a denial
+    await _pump(engine, ["tv1", "tv2", "tv3"], 10)
+    assert engine.stream_owners == {"tv1", "tv2"}
+    assert "tv3" not in backends
+    assert backends["tv1"][0].rates == [25.0]
+    assert backends["tv2"][0].rates == [10.0]
+
     await engine.stop_stream("tv1")
-    await _pump(engine, ["tv2"], 15)
-    assert engine.stream_owners == {"tv2"}
+    await _pump(engine, ["tv2", "tv3"], 15)
+    assert engine.stream_owners == {"tv2", "tv3"}
+    (tv2,) = backends["tv2"]  # moved up to lane 1 without a restart
+    assert tv2.rates == [10.0, 25.0]
+    assert backends["tv3"][0].rates == [10.0]
     await engine.stop()
 
 
-async def test_one_slow_zigbee_stream_at_a_time(tmp_path: Path, monkeypatch) -> None:
-    """Two REST TVs on separate Zigbee lamps do not stream at the same time either."""
-    store = ConfigStore(tmp_path / "config.yaml")
-    store.load()
-    _add_zigbee_tv(store, "tv1", [_LAMP_A])
-    _add_zigbee_tv(store, "tv2", [_LAMP_B])
-    backends = _backends_by_tv(monkeypatch, lambda _user: _CountingBackend())
-    engine = _zigbee_engine(store)
-    engine.submit_color("tv1", "1", _RED)
-    assert await _wait_until(lambda: engine.stream_owners == {"tv1"} and engine.is_streaming)
-    await _pump(engine, ["tv1", "tv2"], 10)
-    assert engine.stream_owners == {"tv1"}
-    assert "tv2" not in backends
-    await engine.stop()
-
-
-async def test_higher_priority_fast_tv_takes_over_the_fast_stream(
+async def test_higher_priority_tv_takes_lane_one_without_restarts(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A higher-priority entertainment TV on other lamps takes the fast stream once it closed."""
-    store = ConfigStore(tmp_path / "config.yaml")
-    store.load()
-    low = _add_zigbee_tv(store, "low", [_LAMP_A])
-    high = _add_zigbee_tv(store, "high", [_LAMP_B], priority=10)
-    made = _lamp_backends(monkeypatch, {"low": 0.3})
+    """A higher-priority TV streams at 25 Hz; the other stream drops to lane 2 and back, live."""
+    store = _store_with_zigbee_tvs(tmp_path, ("low", _LAMP_A, 0), ("high", _LAMP_B, 10))
+    backends = _lane_backends(monkeypatch, store)
     engine = _zigbee_engine(store)
     assert engine.start_stream("low")
-    assert await _wait_until(lambda: engine.stream_owners == {"low"} and engine.is_streaming)
+    assert await _wait_until(lambda: "low" in backends and engine.is_streaming)
     assert engine.start_stream("high")
-    await _pump(engine, ["low", "high"], 40)
-    assert engine.stream_owners == {"high"}
-    first, second = (backend for backend in made if backend.tv in (low.username, high.username))
-    assert first.tv == "low"
-    assert first.closed_at is not None
-    assert second.tv == "high"
-    assert second.started_at is not None
-    assert second.started_at >= first.closed_at
-    assert len(made) == 2  # the outranked TV does not restart while the other one streams
+    await _pump(engine, ["low", "high"], 10)
+    assert engine.stream_owners == {"low", "high"}
+    assert backends["high"][0].rates == [25.0]
+    assert backends["low"][0].rates == [25.0, 10.0]
+
+    store.config.users[1].enabled = False  # its stream ends without a release
+    engine.tv_settings_changed("high")
+    await _pump(engine, ["low"], 10)
+    assert engine.stream_owners == {"low"}
+    (low,) = backends["low"]
+    assert low.rates == [25.0, 10.0, 25.0]
+    assert low.closed_at is None
     await engine.stop()
 
 
-async def test_tv_that_starts_streaming_moves_to_the_fast_rate(tmp_path: Path, monkeypatch) -> None:
-    """A Zigbee stream started from REST colors reopens at the fast rate once the TV streams."""
-    rates: list[float] = []
+async def test_higher_priority_tv_replaces_the_lowest_ranked_stream(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """With both lanes taken, a higher-priority TV starts once the lowest-ranked stream closed."""
+    store = _store_with_zigbee_tvs(
+        tmp_path, ("low", _LAMP_A, 0), ("mid", _LAMP_B, 5), ("high", _LAMP_C, 10)
+    )
+    backends = _lane_backends(monkeypatch, store, close_s=0.3)
+    engine = _zigbee_engine(store)
+    assert engine.start_stream("low")
+    assert await _wait_until(lambda: "low" in backends and engine.is_streaming)
+    assert engine.start_stream("mid")
+    assert await _wait_until(lambda: "mid" in backends)
+    assert engine.start_stream("high")
+    await _pump(engine, ["low", "mid", "high"], 40)
+    assert engine.stream_owners == {"mid", "high"}
+    # One backend each: the outranked TV does not restart, the others change rate live.
+    (low,), (mid,), (high,) = backends["low"], backends["mid"], backends["high"]
+    assert low.closed_at is not None
+    assert high.started_at is not None
+    assert high.started_at >= low.closed_at
+    assert low.rates == [25.0, 10.0]
+    assert mid.rates == [25.0, 10.0]
+    assert high.rates == [25.0]
+    await engine.stop()
 
-    class _RateBackend(_CountingBackend):
-        def __init__(
-            self, _ha: object, _lamps: object, *, max_rate_hz: float, **_options: object
-        ) -> None:
-            super().__init__()
-            rates.append(max_rate_hz)
 
-    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.ZigbeeBackend", _RateBackend)
-    store = ConfigStore(tmp_path / "config.yaml")
-    store.load()
-    _add_zigbee_tv(store, "tv1", [_LAMP_A])
+async def test_streaming_tv_keeps_its_lane_on_a_tie(tmp_path: Path, monkeypatch) -> None:
+    """A priority change swaps the lanes live; back at equal priority the lanes stay put."""
+    store = _store_with_zigbee_tvs(tmp_path, ("tv1", _LAMP_A, 0), ("tv2", _LAMP_B, 0))
+    backends = _lane_backends(monkeypatch, store)
+    engine = _zigbee_engine(store)
+    assert engine.start_stream("tv1")
+    assert await _wait_until(lambda: "tv1" in backends and engine.is_streaming)
+    assert engine.start_stream("tv2")
+    assert await _wait_until(lambda: "tv2" in backends)
+    second = store.config.users[1]
+    second.stream_priority = 10
+    engine.tv_settings_changed("tv2")
+    second.stream_priority = 0
+    engine.tv_settings_changed("tv2")
+    await _pump(engine, ["tv1", "tv2"], 10)
+    (tv1,), (tv2,) = backends["tv1"], backends["tv2"]
+    assert tv1.rates == [25.0, 10.0]
+    assert tv2.rates == [10.0, 25.0]
+    await engine.stop()
+
+
+async def test_released_stream_leaves_lane_one_until_the_tv_resumes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A TV that turns its stream off drops to lane 2 while kept warm, and moves back on resume."""
+    store = _store_with_zigbee_tvs(tmp_path, ("tv1", _LAMP_A, 10), ("tv2", _LAMP_B, 0))
+    backends = _lane_backends(monkeypatch, store)
+    engine = _zigbee_engine(store)
+    assert engine.start_stream("tv1")
+    assert await _wait_until(lambda: "tv1" in backends and engine.is_streaming)
+    assert engine.start_stream("tv2")
+    await _pump(engine, ["tv1", "tv2"], 10)
+    engine.release_stream("tv1")
+    assert backends["tv1"][0].rates == [25.0, 10.0]
+    assert backends["tv2"][0].rates == [10.0, 25.0]
+    engine.submit_color("tv1", "1", _RED)  # back within the idle timeout
+    await _pump(engine, ["tv1", "tv2"], 5)
+    (tv1,), (tv2,) = backends["tv1"], backends["tv2"]
+    assert tv1.rates == [25.0, 10.0, 25.0]
+    assert tv2.rates == [10.0, 25.0, 10.0]
+    await engine.stop()
+
+
+async def test_rest_tvs_stream_at_most_five_hz_in_either_lane(tmp_path: Path, monkeypatch) -> None:
+    """TVs that only push REST colors take both lanes at 5 Hz, also after moving up a lane."""
+    store = _store_with_zigbee_tvs(tmp_path, ("tv1", _LAMP_A, 10), ("tv2", _LAMP_B, 0))
+    backends = _lane_backends(monkeypatch, store)
+    engine = _zigbee_engine(store)
+    await _pump(engine, ["tv1", "tv2"], 15)
+    assert engine.stream_owners == {"tv1", "tv2"}
+    assert (_slot(engine, "tv1").lane, _slot(engine, "tv2").lane) == (1, 2)
+    assert backends["tv1"][0].rates == [5.0]
+    assert backends["tv2"][0].rates == [5.0]
+    store.config.users[0].enabled = False
+    engine.tv_settings_changed("tv1")
+    await _pump(engine, ["tv2"], 10)
+    assert engine.stream_owners == {"tv2"}
+    assert _slot(engine, "tv2").lane == 1
+    assert backends["tv2"][0].rates == [5.0]
+    await engine.stop()
+
+
+async def test_tv_that_starts_streaming_gets_its_lane_rate_without_a_restart(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A Zigbee stream started from REST colors speeds up live once the TV streams."""
+    store = _store_with_zigbee_tvs(tmp_path, ("tv1", _LAMP_A, 0))
+    backends = _lane_backends(monkeypatch, store)
     engine = _zigbee_engine(store)
     engine.submit_color("tv1", "1", _RED)
-    assert await _wait_until(lambda: engine.is_streaming)
-    assert rates == [5.0]
+    assert await _wait_until(lambda: "tv1" in backends and engine.is_streaming)
     assert engine.start_stream("tv1")
-    assert await _wait_until(lambda: rates == [5.0, 25.0] and engine.is_streaming)
+    await _pump(engine, ["tv1"], 10)
+    (tv1,) = backends["tv1"]
+    assert tv1.rates == [5.0, 25.0]
+    assert tv1.closed_at is None
+    await engine.stop()
+
+
+async def test_failed_zigbee_start_hands_its_lane_back(tmp_path: Path, monkeypatch) -> None:
+    """A higher-priority TV whose start fails leaves the other stream at the full rate."""
+    store = _store_with_zigbee_tvs(tmp_path, ("low", _LAMP_A, 0), ("high", _LAMP_B, 10))
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine._START_RETRY_BACKOFF_S", 60.0)
+    backends = _lane_backends(monkeypatch, store, failing=frozenset({"high"}))
+    engine = _zigbee_engine(store)
+    assert engine.start_stream("low")
+    assert await _wait_until(lambda: "low" in backends and engine.is_streaming)
+    assert engine.start_stream("high")
+    assert await _wait_until(lambda: "high" in backends)
+    await _pump(engine, ["low", "high"], 5)
+    assert engine.stream_owners == {"low"}
+    assert backends["low"][0].rates == [25.0, 10.0, 25.0]
     await engine.stop()
 
 
@@ -1596,39 +1763,45 @@ async def test_rival_that_loses_its_own_output_does_not_take_the_stream(
     await engine.stop()
 
 
-async def test_releasing_a_zigbee_stream_hands_its_kind_to_another_output(
+async def test_releasing_a_zigbee_stream_hands_its_lane_to_another_output(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A TV turning its stream off frees the fast stream for a TV waiting on other lamps."""
-    store = ConfigStore(tmp_path / "config.yaml")
-    store.load()
-    _add_zigbee_tv(store, "tv1", [_LAMP_A])
-    _add_zigbee_tv(store, "tv2", [_LAMP_B])
+    """A TV turning its stream off frees its lane for a TV waiting on other lamps."""
+    store = _store_with_zigbee_tvs(
+        tmp_path, ("tv1", _LAMP_A, 0), ("tv2", _LAMP_B, 0), ("tv3", _LAMP_C, 0)
+    )
     _backends_by_tv(monkeypatch, lambda _user: _CountingBackend())
     engine = _zigbee_engine(store)
     assert engine.start_stream("tv1")
-    assert await _wait_until(lambda: engine.stream_owners == {"tv1"} and engine.is_streaming)
-    assert engine.start_stream("tv2")  # waits for the fast stream, not denied
-    await _pump(engine, ["tv1", "tv2"], 10)
+    assert engine.start_stream("tv2")
+    assert await _wait_until(lambda: engine.stream_owners == {"tv1", "tv2"} and engine.is_streaming)
+    assert engine.start_stream("tv3")  # waits for a lane, not denied
+    await _pump(engine, ["tv1", "tv2", "tv3"], 10)
+    assert engine.stream_owners == {"tv1", "tv2"}
     engine.release_stream("tv1")
-    await _pump(engine, ["tv2"], 20)  # well within the 10 s idle timeout
-    assert engine.stream_owners == {"tv2"}
+    await _pump(engine, ["tv2", "tv3"], 20)  # well within the 10 s idle timeout
+    assert engine.stream_owners == {"tv2", "tv3"}
     await engine.stop()
 
 
-async def test_waiting_for_zigbee_capacity_is_not_a_denial(tmp_path: Path, monkeypatch) -> None:
-    """A TV waiting for the fast Zigbee stream is accepted, whatever its priority."""
-    store = ConfigStore(tmp_path / "config.yaml")
-    store.load()
-    _add_zigbee_tv(store, "low", [_LAMP_A])
-    _add_zigbee_tv(store, "high", [_LAMP_B], priority=10)
-    _add_zigbee_tv(store, "peer", [_LAMP_C], priority=10)
+async def test_waiting_for_a_zigbee_lane_is_not_a_denial(tmp_path: Path, monkeypatch) -> None:
+    """A TV waiting for a Zigbee lane is accepted, whatever its priority."""
+    store = _store_with_zigbee_tvs(
+        tmp_path,
+        ("low", _LAMP_A, 0),
+        ("high", _LAMP_B, 10),
+        ("peer", _LAMP_C, 10),
+        ("third", _LAMP_D, 10),
+    )
     _backends_by_tv(monkeypatch, lambda _user: _CountingBackend())
     engine = _zigbee_engine(store)
     assert engine.start_stream("high")
-    assert await _wait_until(lambda: engine.stream_owners == {"high"} and engine.is_streaming)
-    assert engine.start_stream("low")
     assert engine.start_stream("peer")
-    await _pump(engine, ["high", "low", "peer"], 10)
-    assert engine.stream_owners == {"high"}
+    assert await _wait_until(
+        lambda: engine.stream_owners == {"high", "peer"} and engine.is_streaming
+    )
+    assert engine.start_stream("low")
+    assert engine.start_stream("third")
+    await _pump(engine, ["high", "peer", "low", "third"], 10)
+    assert engine.stream_owners == {"high", "peer"}
     await engine.stop()
