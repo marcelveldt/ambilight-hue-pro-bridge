@@ -50,7 +50,7 @@ class PairedUser:
     created: str
     # Whether this TV may open an outbound Hue Entertainment session.
     enabled: bool = True
-    # Higher values win when multiple TVs request the bridge's single streaming slot.
+    # Higher values win when multiple TVs request the same output (a Hue bridge or Zigbee lamps).
     stream_priority: int = 0
     # Where this TV's colors go: a Hue bridge entertainment area or Zigbee lamps from ZHA.
     target: StreamTarget = StreamTarget.HUE

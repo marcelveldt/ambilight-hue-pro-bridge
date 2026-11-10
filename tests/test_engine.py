@@ -15,7 +15,7 @@ from ambilight_hue_bridge.config.models import (
     ZigbeeLightRef,
 )
 from ambilight_hue_bridge.config.store import ConfigStore
-from ambilight_hue_bridge.engine.engine import Engine
+from ambilight_hue_bridge.engine.engine import Engine, _resource_key
 from ambilight_hue_bridge.engine.ingest import ColorBuffer
 from ambilight_hue_bridge.engine.mapping import map_to_commands
 from ambilight_hue_bridge.outbound.backend import BackendHealth, HueBridgeBackend, ZigbeeBackend
@@ -24,6 +24,8 @@ from ambilight_hue_bridge.outbound.controller import lights_from_zigbee
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from ambilight_hue_bridge.engine.engine import _StreamSlot
 
 
 def test_buffer_latest_wins() -> None:
@@ -132,9 +134,16 @@ def _add_tv(
     return user
 
 
+def _slot(engine: Engine, owner: str = "tv1") -> _StreamSlot:
+    """Return the stream slot of a TV's output (created on first use)."""
+    slot = engine._slot_for(owner)
+    assert slot is not None
+    return slot
+
+
 def _captured_rid(engine: Engine) -> str:
     """Return the streamer rid the active Hue bridge backend captured ('' when none)."""
-    backend = engine._backend
+    backend = _slot(engine).backend
     return backend._our_streamer_rid if isinstance(backend, HueBridgeBackend) else ""
 
 
@@ -164,13 +173,13 @@ async def test_engine_streams_on_submit(tmp_path: Path, monkeypatch) -> None:
     engine.submit_color("tv1", "1", (65535, 0, 0))
     assert await _wait_until(lambda: bool(created) and bool(created[0].frames))
     assert engine.is_streaming
-    assert engine.stream_owner == "tv1"
+    assert engine.stream_owners == {"tv1"}
     first_frame = created[0].frames[0]
     assert isinstance(first_frame, list)
     assert first_frame[0].channel_id == 0
-    assert await _wait_until(lambda: engine._transition_task is None)
+    assert await _wait_until(lambda: _slot(engine).transition_task is None)
     engine.submit_color("tv1", "1", (0, 65535, 0))
-    assert engine._transition_task is None
+    assert _slot(engine).transition_task is None
     await engine.stop()
     assert not engine.is_streaming
 
@@ -180,16 +189,17 @@ def test_smoothing_eases_toward_target(tmp_path: Path) -> None:
     store = _configured_store(tmp_path)
     store.config.users[0].stream_smoothing = 0.5
     engine = Engine(store)
-    engine._stream_owner = "tv1"  # resolve smoothing from this TV's per-TV setting
+    slot = _slot(engine)
+    smoothing = engine._resolve_smoothing("tv1")  # resolve smoothing from this TV's per-TV setting
     lights = store.config.users[0].lights
-    engine._buffer.set_color("1", (100, 200, 40))
-    engine._apply_smoothing(lights)
+    slot.buffer.set_color("1", (100, 200, 40))
+    slot.apply_smoothing(lights, smoothing)
     # First sight: straight to the target (no fade-from-black flash).
-    assert engine._smoothed_buffer.get_color("1") == (100, 200, 40)
-    engine._buffer.set_color("1", (0, 0, 0))
-    engine._apply_smoothing(lights)
+    assert slot.smoothed_buffer.get_color("1") == (100, 200, 40)
+    slot.buffer.set_color("1", (0, 0, 0))
+    slot.apply_smoothing(lights, smoothing)
     # Halfway eased toward the new target with smoothing 0.5.
-    assert engine._smoothed_buffer.get_color("1") == (50, 100, 20)
+    assert slot.smoothed_buffer.get_color("1") == (50, 100, 20)
 
 
 def test_smoothing_off_is_instant(tmp_path: Path) -> None:
@@ -197,13 +207,14 @@ def test_smoothing_off_is_instant(tmp_path: Path) -> None:
     store = _configured_store(tmp_path)
     store.config.users[0].stream_smoothing = 0.0
     engine = Engine(store)
-    engine._stream_owner = "tv1"
+    slot = _slot(engine)
+    smoothing = engine._resolve_smoothing("tv1")
     lights = store.config.users[0].lights
-    engine._buffer.set_color("1", (100, 200, 40))
-    engine._apply_smoothing(lights)
-    engine._buffer.set_color("1", (10, 20, 30))
-    engine._apply_smoothing(lights)
-    assert engine._smoothed_buffer.get_color("1") == (10, 20, 30)
+    slot.buffer.set_color("1", (100, 200, 40))
+    slot.apply_smoothing(lights, smoothing)
+    slot.buffer.set_color("1", (10, 20, 30))
+    slot.apply_smoothing(lights, smoothing)
+    assert slot.smoothed_buffer.get_color("1") == (10, 20, 30)
 
 
 async def test_engine_does_not_stream_without_credentials(tmp_path: Path) -> None:
@@ -239,12 +250,13 @@ def test_apply_identify_blinks_then_expires(tmp_path: Path) -> None:
     """An identified light is forced full-white/off, and the entry expires after its window."""
     store = _configured_store(tmp_path)
     engine = Engine(store)
+    slot = _slot(engine)
     engine._identify["tv1"] = {"1": time.monotonic() + 5.0}
-    engine._apply_identify("tv1")
-    assert engine._smoothed_buffer.get_color("1") in {(65535, 65535, 65535), (0, 0, 0)}
+    engine._apply_identify(slot, "tv1")
+    assert slot.smoothed_buffer.get_color("1") in {(65535, 65535, 65535), (0, 0, 0)}
     assert "1" in engine._identify["tv1"]
     engine._identify["tv1"]["1"] = time.monotonic() - 1.0  # already expired
-    engine._apply_identify("tv1")
+    engine._apply_identify(slot, "tv1")
     assert "tv1" not in engine._identify
 
 
@@ -262,7 +274,7 @@ async def test_identify_opens_a_stream(tmp_path: Path, monkeypatch) -> None:
     engine.identify("tv1", "1")
     assert "1" in engine._identify["tv1"]
     assert await _wait_until(lambda: engine.is_streaming)
-    assert engine.stream_owner == "tv1"
+    assert engine.stream_owners == {"tv1"}
     await engine.stop()
 
 
@@ -270,11 +282,10 @@ def test_resolve_smoothing_is_per_tv_else_off(tmp_path: Path) -> None:
     """Smoothing resolves to the owning TV's value, defaulting to 0 (off) when unset."""
     store = _configured_store(tmp_path)
     engine = Engine(store)
-    assert engine._resolve_smoothing() == 0.0  # no owner -> off
-    engine._stream_owner = "tv1"
-    assert engine._resolve_smoothing() == 0.0  # tv1 has no value set -> off
+    assert engine._resolve_smoothing("unknown") == 0.0  # no such TV -> off
+    assert engine._resolve_smoothing("tv1") == 0.0  # tv1 has no value set -> off
     store.config.users[0].stream_smoothing = 0.6
-    assert engine._resolve_smoothing() == 0.6  # the TV's own setting
+    assert engine._resolve_smoothing("tv1") == 0.6  # the TV's own setting
 
 
 def test_submit_color_keeps_tv_buffers_isolated(tmp_path: Path) -> None:
@@ -352,9 +363,9 @@ async def test_start_stream_sets_owner_then_clears_on_stop(tmp_path: Path, monke
     engine = Engine(_configured_store(tmp_path))
     engine.start_stream("tv1")
     assert await _wait_until(lambda: engine.is_streaming)
-    assert engine.stream_owner == "tv1"
+    assert engine.stream_owners == {"tv1"}
     await engine.stop()
-    assert engine.stream_owner is None
+    assert not engine.stream_owners
 
 
 async def test_higher_priority_tv_preempts_active_stream(tmp_path: Path, monkeypatch) -> None:
@@ -372,11 +383,11 @@ async def test_higher_priority_tv_preempts_active_stream(tmp_path: Path, monkeyp
     monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", factory)
     engine = Engine(store)
     assert engine.start_stream("tv1")
-    assert await _wait_until(lambda: engine.is_streaming and engine.stream_owner == "tv1")
+    assert await _wait_until(lambda: engine.is_streaming and engine.stream_owners == {"tv1"})
 
     assert engine.start_stream("tv2")
     assert await _wait_until(
-        lambda: len(created) == 2 and engine.is_streaming and engine.stream_owner == "tv2"
+        lambda: len(created) == 2 and engine.is_streaming and engine.stream_owners == {"tv2"}
     )
     assert created[0].connected is False
     await engine.stop()
@@ -403,7 +414,7 @@ async def test_equal_priority_tv_does_not_preempt_current_owner(
 
     assert engine.start_stream("tv2") is False
     await asyncio.sleep(0.05)
-    assert engine.stream_owner == "tv1"
+    assert engine.stream_owners == {"tv1"}
     assert len(created) == 1
     await engine.stop()
 
@@ -424,11 +435,11 @@ async def test_enabling_pending_tv_starts_its_stream(tmp_path: Path, monkeypatch
     assert engine.start_stream("tv1")
     await asyncio.sleep(0.05)
     assert not created
-    assert engine.stream_owner is None
+    assert not engine.stream_owners
 
     store.config.users[0].enabled = True
     engine.tv_settings_changed("tv1")
-    assert await _wait_until(lambda: engine.is_streaming and engine.stream_owner == "tv1")
+    assert await _wait_until(lambda: engine.is_streaming and engine.stream_owners == {"tv1"})
     await engine.stop()
 
 
@@ -447,14 +458,14 @@ async def test_disabling_owner_hands_stream_to_pending_tv(tmp_path: Path, monkey
     monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", factory)
     engine = Engine(store)
     assert engine.start_stream("tv1")
-    assert await _wait_until(lambda: engine.is_streaming and engine.stream_owner == "tv1")
+    assert await _wait_until(lambda: engine.is_streaming and engine.stream_owners == {"tv1"})
     assert engine.start_stream("tv2") is False
 
     store.config.users[0].enabled = False
     engine.tv_settings_changed("tv1")
     assert await _wait_until(
         lambda: (
-            len(created) == 2 and engine.is_streaming and engine.stream_owner == waiting.username
+            len(created) == 2 and engine.is_streaming and engine.stream_owners == {waiting.username}
         )
     )
     assert created[0].connected is False
@@ -482,7 +493,7 @@ async def test_enabling_lower_priority_tv_does_not_preempt(tmp_path: Path, monke
     waiting.enabled = True
     engine.tv_settings_changed("tv2")
     await asyncio.sleep(0.05)
-    assert engine.stream_owner == "tv1"
+    assert engine.stream_owners == {"tv1"}
     assert len(created) == 1
     await engine.stop()
 
@@ -506,7 +517,7 @@ async def test_health_recovers_on_silent_bridge_drop(tmp_path: Path, monkeypatch
     created[0].status = ("inactive", "")
     assert await _wait_until(lambda: not engine.is_streaming)
     # No re-grab backoff for a plain drop, so the next frame re-establishes it.
-    assert engine._regrab_block_until == 0.0
+    assert _slot(engine).regrab_block_until == 0.0
     await engine.stop()
 
 
@@ -529,7 +540,7 @@ async def test_health_backs_off_on_takeover(tmp_path: Path, monkeypatch) -> None
     assert await _wait_until(lambda: _captured_rid(engine) == "us")
     created[0].status = ("active", "other-app")
     assert await _wait_until(lambda: not engine.is_streaming)
-    assert engine._regrab_block_until > time.monotonic()
+    assert _slot(engine).regrab_block_until > time.monotonic()
     # Within the backoff window a new frame must NOT re-grab the stream.
     engine.submit_color("tv1", "1", (0, 65535, 0))
     assert not await _wait_until(lambda: engine.is_streaming, max_wait=0.2)
@@ -555,7 +566,7 @@ async def test_health_recovers_when_streamer_cleared(tmp_path: Path, monkeypatch
     # Bridge keeps the config active but no longer names a streamer: our stream was dropped.
     created[0].status = ("active", "")
     assert await _wait_until(lambda: not engine.is_streaming)
-    assert engine._regrab_block_until == 0.0  # a drop, not a takeover - re-grab is allowed
+    assert _slot(engine).regrab_block_until == 0.0  # a drop, not a takeover - re-grab is allowed
     await engine.stop()
 
 
@@ -672,7 +683,7 @@ async def test_lost_stream_restarts_while_the_tv_keeps_sending(tmp_path: Path, m
     for _ in range(40):
         engine.submit_color("tv1", "1", (65535, 0, 0))
         await asyncio.sleep(0.02)
-    assert engine.stream_owner == "tv1"
+    assert engine.stream_owners == {"tv1"}
     assert engine.is_streaming
     live = [backend for backend in backends if backend.streaming]
     assert len(live) == 1
@@ -706,7 +717,7 @@ async def test_restart_stream_reopens_the_active_stream(tmp_path: Path, monkeypa
     assert await _wait_until(lambda: len(backends) == 2 and engine.is_streaming)
     assert backends[0].closed
     assert backends[1].started_at >= backends[0].closed_at
-    assert engine.stream_owner == "tv1"
+    assert engine.stream_owners == {"tv1"}
     await engine.restart_stream("someone-else")  # not the owner: nothing happens
     assert len(backends) == 2
     await engine.stop()
@@ -768,7 +779,7 @@ async def test_open_rechecks_ownership_after_waiting_for_a_close(
     store = _configured_store(tmp_path)
     engine = Engine(store, rate_hz=50)
     release = asyncio.Event()
-    engine._closing = asyncio.create_task(release.wait())  # an earlier backend still closing
+    _slot(engine).closing = asyncio.create_task(release.wait())  # an earlier backend still closing
     engine.submit_color("tv1", "1", (65535, 0, 0))
     await asyncio.sleep(0.05)  # the new stream now waits for that close
     store.config.users[0].enabled = False
@@ -776,7 +787,7 @@ async def test_open_rechecks_ownership_after_waiting_for_a_close(
     release.set()
     await asyncio.sleep(0.1)
     assert backends == []
-    assert engine.stream_owner is None
+    assert not engine.stream_owners
     await engine.stop()
 
 
@@ -904,8 +915,8 @@ async def test_zigbee_tv_streams_without_a_hue_bridge(tmp_path: Path, monkeypatc
     )
     engine.submit_color("tv1", "1", (65535, 0, 0))
     assert await _wait_until(lambda: bool(created) and bool(created[0].frames))
-    assert isinstance(engine._backend, ZigbeeBackend)
-    assert engine.stream_owner == "tv1"
+    assert isinstance(_slot(engine).backend, ZigbeeBackend)
+    assert engine.stream_owners == {"tv1"}
     first_frame = created[0].frames[0]
     assert isinstance(first_frame, list)
     assert first_frame[0].channel_id == 0
@@ -944,3 +955,313 @@ def test_create_backend_follows_the_tv_target(tmp_path: Path, monkeypatch) -> No
     assert created is not None
     assert isinstance(created[0], ZigbeeBackend)
     assert created[1] == "1 Zigbee lamp(s)"
+
+
+_LAMP_A = "00:17:88:01:00:00:00:0a"
+_LAMP_B = "00:17:88:01:00:00:00:0b"
+_LAMP_C = "00:17:88:01:00:00:00:0c"
+_RED = (65535, 0, 0)
+
+
+def _add_zigbee_tv(
+    store: ConfigStore, username: str, ieees: list[str], *, priority: int = 0
+) -> PairedUser:
+    """Add a Zigbee-target TV streaming to the given lamps to a test store."""
+    lamps = [ZigbeeLightRef(ieee=ieee, name=ieee) for ieee in ieees]
+    user = PairedUser(
+        username=username,
+        clientkey="k",
+        devicetype="TV",
+        created="2026-11-10",
+        stream_priority=priority,
+        target=StreamTarget.ZIGBEE,
+        zigbee_lights=lamps,
+        lights=lights_from_zigbee(lamps),
+    )
+    store.config.users.append(user)
+    return user
+
+
+class _CountingBackend(_ScriptedBackend):
+    """Instant backend that counts frames and records its close."""
+
+    def __init__(self, script: list[BackendHealth | Exception] | None = None) -> None:
+        super().__init__(script or [])
+        self.frames = 0
+        self.closed = False
+
+    def send(self, _commands: object) -> None:
+        self.frames += 1
+
+    async def aclose(self) -> None:
+        self.streaming = False
+        self.closed = True
+
+
+def _backends_by_tv[BackendT: _ScriptedBackend](
+    monkeypatch, make: Callable[[PairedUser], BackendT]
+) -> dict[str, list[BackendT]]:
+    """Patch backend creation to ``make``; return the backends created, per TV."""
+    created: dict[str, list[BackendT]] = {}
+
+    def create(_self: Engine, user: PairedUser) -> tuple[BackendT, str]:
+        backend = make(user)
+        created.setdefault(user.username, []).append(backend)
+        return backend, user.username
+
+    monkeypatch.setattr(Engine, "_create_backend", create)
+    return created
+
+
+def test_resource_key_groups_zigbee_tvs_linked_by_lamps(tmp_path: Path) -> None:
+    """Hue TVs share their bridge's key; Zigbee TVs share one only when lamps link them."""
+    store = _configured_store(tmp_path)
+    _add_tv(store, "tv2", priority=0)
+    _add_zigbee_tv(store, "z1", [_LAMP_A])
+    _add_zigbee_tv(store, "z2", [_LAMP_B])
+    _add_zigbee_tv(store, "z3", [_LAMP_C.upper()])
+    assert _resource_key(store, "tv1") == _resource_key(store, "tv2") == "hue:b"
+    assert len({_resource_key(store, tv) for tv in ("z1", "z2", "z3")}) == 3
+    # z4 shares a lamp with z1 and with z3, linking all three into one output.
+    linker = _add_zigbee_tv(store, "z4", [_LAMP_A, _LAMP_C])
+    assert _resource_key(store, "z1") == _resource_key(store, "z3") == _resource_key(store, "z4")
+    assert _resource_key(store, "z2") not in {_resource_key(store, "z1"), None}
+    linker.zigbee_lights = []
+    assert _resource_key(store, "z4") is None
+    assert _resource_key(store, "z1") != _resource_key(store, "z3")
+    store.config.real_bridges = []
+    assert _resource_key(store, "tv1") is None
+    assert _resource_key(store, "unknown") is None
+
+
+async def test_hue_and_zigbee_tvs_stream_at_the_same_time(tmp_path: Path, monkeypatch) -> None:
+    """A Hue TV and a Zigbee TV each get their own stream; neither denies the other."""
+    store = _configured_store(tmp_path)
+    _add_zigbee_tv(store, "tvz", [_LAMP_A])
+    backends = _backends_by_tv(monkeypatch, lambda _user: _CountingBackend())
+    engine = Engine(store, rate_hz=100, home_assistant=_FakeHomeAssistant())  # type: ignore[arg-type]
+    assert engine.start_stream("tv1")
+    assert engine.start_stream("tvz")
+    engine.submit_color("tv1", "1", _RED)
+    engine.submit_color("tvz", "1", _RED)
+    assert await _wait_until(
+        lambda: all(tv in backends and backends[tv][0].frames for tv in ("tv1", "tvz"))
+    )
+    assert engine.stream_owners == {"tv1", "tvz"}
+    await engine.stop()
+
+
+async def test_hue_tvs_arbitrate_without_touching_a_zigbee_stream(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A higher-priority Hue TV takes over the bridge; the Zigbee TV's stream carries on."""
+    store = _configured_store(tmp_path)
+    store.config.users[0].stream_priority = 1
+    _add_tv(store, "tv2", priority=10)
+    _add_tv(store, "tv3", priority=10)
+    _add_zigbee_tv(store, "tvz", [_LAMP_A])
+    backends = _backends_by_tv(monkeypatch, lambda _user: _CountingBackend())
+    engine = Engine(store, rate_hz=100, home_assistant=_FakeHomeAssistant())  # type: ignore[arg-type]
+    assert engine.start_stream("tv1")
+    assert engine.start_stream("tvz")
+    assert await _wait_until(lambda: engine.stream_owners == {"tv1", "tvz"} and "tvz" in backends)
+    zigbee = backends["tvz"][0]
+
+    assert engine.start_stream("tv2")
+    assert await _wait_until(lambda: engine.stream_owners == {"tv2", "tvz"} and "tv2" in backends)
+    assert backends["tv1"][0].closed
+    assert engine.start_stream("tv3") is False  # equal priority: tv2 keeps the bridge
+    await asyncio.sleep(0.05)
+    assert "tv3" not in backends
+    assert backends["tvz"] == [zigbee]
+    assert zigbee.streaming
+    await engine.stop()
+
+
+async def test_zigbee_tvs_with_separate_lamps_stream_at_the_same_time(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Two Zigbee TVs without a shared lamp both stream, whatever their priorities."""
+    store = _zigbee_store(tmp_path)
+    store.config.users[0].stream_priority = 10
+    _add_zigbee_tv(store, "tv2", [_LAMP_A])
+    backends = _backends_by_tv(monkeypatch, lambda _user: _CountingBackend())
+    engine = Engine(store, rate_hz=100, home_assistant=_FakeHomeAssistant())  # type: ignore[arg-type]
+    assert engine.start_stream("tv1")
+    assert engine.start_stream("tv2")
+    assert await _wait_until(
+        lambda: all(tv in backends and backends[tv][0].frames for tv in ("tv1", "tv2"))
+    )
+    assert engine.stream_owners == {"tv1", "tv2"}
+    await engine.stop()
+
+
+async def test_zigbee_tvs_sharing_a_lamp_arbitrate(tmp_path: Path, monkeypatch) -> None:
+    """Zigbee TVs with a lamp in common compete for one stream, by priority."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    _add_zigbee_tv(store, "tv1", [_LAMP_A, _LAMP_B])
+    second = _add_zigbee_tv(store, "tv2", [_LAMP_B, _LAMP_C])
+    backends = _backends_by_tv(monkeypatch, lambda _user: _CountingBackend())
+    engine = Engine(store, rate_hz=100, home_assistant=_FakeHomeAssistant())  # type: ignore[arg-type]
+    assert engine.start_stream("tv1")
+    assert await _wait_until(lambda: engine.is_streaming)
+    assert engine.start_stream("tv2") is False
+    await asyncio.sleep(0.05)
+    assert engine.stream_owners == {"tv1"}
+    assert "tv2" not in backends
+
+    second.stream_priority = 10
+    engine.tv_settings_changed("tv2")
+    assert await _wait_until(lambda: engine.stream_owners == {"tv2"} and engine.is_streaming)
+    assert backends["tv1"][0].closed
+    await engine.stop()
+
+
+async def test_zigbee_tvs_linked_by_a_new_shared_lamp_arbitrate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Giving a streaming Zigbee TV another TV's lamp leaves only the higher-priority one."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    _add_zigbee_tv(store, "tvb", [_LAMP_A])
+    winner = _add_zigbee_tv(store, "tva", [_LAMP_B], priority=10)
+    backends = _backends_by_tv(monkeypatch, lambda _user: _CountingBackend())
+    engine = Engine(store, rate_hz=100, home_assistant=_FakeHomeAssistant())  # type: ignore[arg-type]
+    assert engine.start_stream("tvb")
+    assert engine.start_stream("tva")
+    assert await _wait_until(lambda: engine.stream_owners == {"tva", "tvb"} and engine.is_streaming)
+
+    # As the web UI does: update the lamps, then restart the TV and re-evaluate ownership.
+    winner.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_A), ZigbeeLightRef(ieee=_LAMP_B)]
+    winner.lights = lights_from_zigbee(winner.zigbee_lights)
+    await engine.restart_stream("tva")
+    engine.tv_settings_changed("tva")
+    assert await _wait_until(lambda: len(backends["tva"]) == 2 and backends["tva"][1].streaming)
+    assert await _wait_until(lambda: backends["tvb"][0].closed)
+    assert engine.stream_owners == {"tva"}
+    await engine.stop()
+
+
+async def test_failed_zigbee_start_does_not_hold_back_a_hue_tv(tmp_path: Path, monkeypatch) -> None:
+    """A Zigbee TV backing off after a failed start leaves the Hue bridge free to stream."""
+    starts: list[str] = []
+
+    class _FailingBackend(_CountingBackend):
+        async def start(self) -> None:
+            starts.append("zigbee")
+            msg = "lamps unreachable"
+            raise OSError(msg)
+
+    store = _configured_store(tmp_path)
+    _add_zigbee_tv(store, "tvz", [_LAMP_A])
+    backends = _backends_by_tv(
+        monkeypatch,
+        lambda user: (
+            _FailingBackend() if user.target is StreamTarget.ZIGBEE else _CountingBackend()
+        ),
+    )
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine._START_RETRY_BACKOFF_S", 60.0)
+    engine = Engine(store, rate_hz=100, home_assistant=_FakeHomeAssistant())  # type: ignore[arg-type]
+    engine.submit_color("tvz", "1", _RED)
+    assert await _wait_until(lambda: _slot(engine, "tvz").regrab_block_until > time.monotonic())
+    engine.submit_color("tv1", "1", _RED)
+    assert await _wait_until(lambda: "tv1" in backends and backends["tv1"][0].frames > 0)
+    engine.submit_color("tvz", "1", _RED)
+    await asyncio.sleep(0.05)
+    assert starts == ["zigbee"]  # the Zigbee TV itself still backs off
+    await engine.stop()
+
+
+async def test_hue_takeover_backs_off_only_the_hue_bridge(tmp_path: Path, monkeypatch) -> None:
+    """Another controller taking the Hue area over doesn't keep a Zigbee TV from streaming."""
+    store = _configured_store(tmp_path)
+    _add_zigbee_tv(store, "tvz", [_LAMP_A])
+    backends = _backends_by_tv(
+        monkeypatch,
+        lambda user: (
+            _CountingBackend()
+            if user.target is StreamTarget.ZIGBEE
+            else _CountingBackend([BackendHealth.TAKEN_OVER, BackendHealth.TAKEN_OVER])
+        ),
+    )
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine._HEALTH_POLL_S", 0.02)
+    engine = Engine(store, rate_hz=100, home_assistant=_FakeHomeAssistant())  # type: ignore[arg-type]
+    engine.submit_color("tv1", "1", _RED)
+    assert await _wait_until(lambda: "tv1" in backends and backends["tv1"][0].closed)
+    assert _slot(engine).regrab_block_until > time.monotonic()
+    engine.submit_color("tvz", "1", _RED)
+    assert await _wait_until(lambda: _slot(engine, "tvz").is_streaming)
+    engine.submit_color("tv1", "1", _RED)
+    assert not await _wait_until(lambda: _slot(engine).is_streaming, max_wait=0.2)
+    assert len(backends["tv1"]) == 1
+    await engine.stop()
+
+
+def _switch_to_zigbee(user: PairedUser, ieees: list[str]) -> None:
+    """Point a TV at Zigbee lamps, as the web UI does before restarting its stream."""
+    user.target = StreamTarget.ZIGBEE
+    user.zigbee_lights = [ZigbeeLightRef(ieee=ieee) for ieee in ieees]
+    user.lights = lights_from_zigbee(user.zigbee_lights)
+
+
+async def test_target_switch_moves_the_stream_to_the_new_output(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A TV switched to Zigbee lamps while streaming streams there only, after the Hue close."""
+    store = _configured_store(tmp_path)
+    backends = _backends_by_tv(monkeypatch, lambda _user: _SlowBackend())
+    engine = Engine(store, rate_hz=50, home_assistant=_FakeHomeAssistant())  # type: ignore[arg-type]
+    engine.submit_color("tv1", "1", _RED)
+    assert await _wait_until(lambda: engine.is_streaming)
+    hue_slot = _slot(engine)
+
+    _switch_to_zigbee(store.config.users[0], [_LAMP_A])
+    await engine.restart_stream("tv1")
+    engine.tv_settings_changed("tv1")
+    # The TV keeps sending while the Hue stream closes: no Zigbee stream may start before that.
+    for _ in range(20):
+        engine.submit_color("tv1", "1", _RED)
+        await asyncio.sleep(0.02)
+    assert await _wait_until(lambda: len(backends["tv1"]) == 2 and engine.is_streaming)
+    hue, zigbee = backends["tv1"]
+    assert hue.closed
+    assert zigbee.started_at >= hue.closed_at
+    assert _slot(engine) is not hue_slot
+    assert _slot(engine).owner == "tv1"
+    assert hue_slot.owner is None
+    assert engine.stream_owners == {"tv1"}
+    await engine.stop()
+
+
+async def test_target_switch_resumes_without_a_new_frame(tmp_path: Path, monkeypatch) -> None:
+    """A TV switched to another output resumes there once the old stream closed, unprompted."""
+    store = _configured_store(tmp_path)
+    backends = _backends_by_tv(monkeypatch, lambda _user: _SlowBackend())
+    engine = Engine(store, rate_hz=50, home_assistant=_FakeHomeAssistant())  # type: ignore[arg-type]
+    engine.submit_color("tv1", "1", _RED)
+    assert await _wait_until(lambda: engine.is_streaming)
+
+    _switch_to_zigbee(store.config.users[0], [_LAMP_A])
+    await engine.restart_stream("tv1")
+    engine.tv_settings_changed("tv1")
+    assert await _wait_until(lambda: len(backends["tv1"]) == 2 and engine.is_streaming)
+    assert backends["tv1"][0].closed
+    assert engine.stream_owners == {"tv1"}
+    await engine.stop()
+
+
+async def test_stop_closes_every_output(tmp_path: Path, monkeypatch) -> None:
+    """stop() tears down every output's stream and waits for each backend to finish closing."""
+    store = _configured_store(tmp_path)
+    _add_zigbee_tv(store, "tvz", [_LAMP_A])
+    backends = _backends_by_tv(monkeypatch, lambda _user: _SlowBackend())
+    engine = Engine(store, rate_hz=50, home_assistant=_FakeHomeAssistant())  # type: ignore[arg-type]
+    engine.submit_color("tv1", "1", _RED)
+    engine.submit_color("tvz", "1", _RED)
+    assert await _wait_until(lambda: engine.stream_owners == {"tv1", "tvz"} and len(backends) == 2)
+    assert await _wait_until(lambda: all(bs[0].streaming for bs in backends.values()))
+    await engine.stop()
+    assert all(backend.closed for bs in backends.values() for backend in bs)
+    assert not engine.is_streaming
+    assert not engine.stream_owners

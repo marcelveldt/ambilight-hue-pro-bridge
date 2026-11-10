@@ -50,7 +50,7 @@ class _FakeEngine:
     """Engine stand-in recording the stream lifecycle and submitted colors."""
 
     def __init__(self) -> None:
-        self.stream_owner: str | None = None
+        self.stream_owners: frozenset[str] = frozenset()
         self.is_streaming = False
         self.started: list[str] = []
         self.stopped = 0
@@ -62,14 +62,14 @@ class _FakeEngine:
     def start_stream(self, owner: str) -> bool:
         if owner in self.denied:
             return False
-        self.stream_owner = owner
+        self.stream_owners = frozenset({owner})
         self.is_streaming = True
         self.started.append(owner)
         return True
 
     async def stop_stream(self, _owner: str | None = None) -> None:
         self.is_streaming = False
-        self.stream_owner = None
+        self.stream_owners = frozenset()
         self.stopped += 1
 
     def release_stream(self, owner: str) -> None:

@@ -97,8 +97,7 @@ class InboundStreamer:
         # Resolve against the sending TV's own lights. Using the DTLS identity (not the engine's
         # transient stream owner, which is cleared on teardown) lets streaming auto-recover after
         # an idle timeout or a network blip: the next frame re-adopts the owner via submit_color.
-        owner = identity or self._engine.stream_owner
-        lights = tv_lights(self._store, owner)
+        lights = tv_lights(self._store, identity)
         if not self._logged_frame:
             self._logged_frame = True
             LOGGER.info(
@@ -111,7 +110,7 @@ class InboundStreamer:
         for color in frame.colors:
             light_id = _resolve_light(is_v2=frame.is_v2, target=color.target, lights=lights)
             if light_id is not None:
-                self._engine.submit_color(owner, light_id, color.rgb)
+                self._engine.submit_color(identity, light_id, color.rgb)
 
 
 def _resolve_light(*, is_v2: bool, target: int, lights: list[VirtualLight]) -> str | None:

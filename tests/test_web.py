@@ -29,7 +29,7 @@ class _FakePolicyEngine:
     """Engine stand-in recording TV policy notifications."""
 
     def __init__(self) -> None:
-        self.stream_owner: str | None = None
+        self.stream_owners: frozenset[str] = frozenset()
         self.is_streaming = False
         self.changed: list[str] = []
         self.restarted: list[str] = []

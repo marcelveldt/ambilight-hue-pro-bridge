@@ -1,4 +1,4 @@
-"""Engine: buffers inbound colors and streams them to the real bridge on demand."""
+"""Engine: buffers inbound colors and streams them to each TV's output on demand."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ _IDENTIFY_RGB = (65535, 65535, 65535)
 
 
 class Engine:
-    """Owns the ingest buffer and the on-demand outbound entertainment stream."""
+    """Owns the TVs' color buffers and one on-demand outbound stream per output."""
 
     def __init__(
         self,
@@ -67,59 +67,32 @@ class Engine:
         )
         rate = rate_hz if rate_hz is not None else store.config.virtual_bridge.stream_rate_hz
         self._interval = 1.0 / max(1, rate)
-        self._buffer = ColorBuffer()
         self._owner_buffers: dict[str, ColorBuffer] = {}
-        # Smoothed (eased) colors actually streamed to the bridge: float state for precision
-        # plus an int buffer the mapper reads, so abrupt TV color jumps become fades.
-        self._smoothed_float: dict[str, tuple[float, float, float]] = {}
-        self._smoothed_buffer = ColorBuffer()
-        self._backend: OutputBackend | None = None
-        # A torn-down backend's close (for Zigbee: restoring the lamps) still in progress.
-        self._closing: asyncio.Task[None] | None = None
-        # True while restart_stream() replaces the transition; concurrent restarts coalesce.
-        self._restarting = False
-        self._ticker: asyncio.Task[None] | None = None
-        self._health_task: asyncio.Task[None] | None = None
-        self._transition_task: asyncio.Task[None] | None = None
         self._last_updates: dict[str, float] = {}
         self._active_owners: set[str] = set()
         self._request_order: dict[str, int] = {}
         self._next_request_order = 0
-        # Monotonic time before which a new stream won't be opened (set when another controller
-        # took the area over, so we back off rather than fight it, or after a failed start).
-        self._regrab_block_until = 0.0
-        # Set by the health monitor when the bridge has ended our stream; the ticker watches it
-        # and tears down (keeping teardown a single-owner path).
-        self._remote_dead = False
-        # Username (paired TV) that owns the active or currently-opening outbound stream.
-        self._stream_owner: str | None = None
-        # The lights mapped for the active stream (the owning TV's assigned lights), resolved
-        # when the stream starts. Cleared on teardown.
-        self._stream_lights: list[VirtualLight] = []
-        # Monotonic token bumped on every stop. The (slow, ~seconds) DTLS connect to the real
-        # bridge is not reliably cancellable, so a start that completes after a stop checks this
-        # to discard itself instead of leaving a zombie stream behind.
-        self._stream_gen = 0
+        # One stream slot per exclusive output (a Hue bridge, or a group of Zigbee lamps), keyed
+        # by _resource_key() and created on first use. TVs on different outputs stream at once.
+        self._slots: dict[str, _StreamSlot] = {}
         # Lights each TV asked to identify, keyed by owner then light id -> blink expiry.
         self._identify: dict[str, dict[str, float]] = {}
         # One-shot diagnostic flags so the streaming hot path logs its first event of each
-        # kind (first color in, first frame out, why it can't start) without per-frame spam.
+        # kind (first color in, why it can't start) without per-frame spam.
         self._logged_submit = False
         self._logged_no_stream = False
-        self._logged_tick = False
-        self._logged_empty = False
 
     @property
     def is_streaming(self) -> bool:
-        """Return True while the outbound stream is active."""
-        return self._backend is not None and self._backend.is_streaming
+        """Return True while any outbound stream is active."""
+        return any(slot.is_streaming for slot in self._slots.values())
 
     @property
-    def stream_owner(self) -> str | None:
-        """Return the paired username that owns the active stream, or None."""
-        return self._stream_owner
+    def stream_owners(self) -> frozenset[str]:
+        """Return the paired usernames that own an active (or opening) outbound stream."""
+        return frozenset(slot.owner for slot in self._slots.values() if slot.owner is not None)
 
-    def submit_color(self, owner: str | None, light_id: str, rgb: tuple[int, int, int]) -> None:
+    def submit_color(self, owner: str, light_id: str, rgb: tuple[int, int, int]) -> None:
         """
         Record a color for a virtual light and ensure the stream is running.
 
@@ -131,24 +104,24 @@ class Engine:
         :param rgb: 16-bit RGB tuple (0-65535 per channel).
         """
         now = time.monotonic()
-        if owner:
-            # Keep colors isolated because every TV uses the same virtual light ids. A denied TV
-            # may continue sending while another one owns the real bridge.
-            self._owner_buffers.setdefault(owner, ColorBuffer()).set_color(light_id, rgb)
-            self._last_updates[owner] = now
-            self._remember_request(owner)
-        else:
-            self._buffer.set_color(light_id, rgb)
+        # Keep colors isolated because every TV uses the same virtual light ids. A denied TV
+        # may continue sending while another one owns the real bridge.
+        self._owner_buffers.setdefault(owner, ColorBuffer()).set_color(light_id, rgb)
+        self._last_updates[owner] = now
+        self._remember_request(owner)
         if not self._logged_submit:
             self._logged_submit = True
             LOGGER.info("First inbound color submitted: light=%s rgb=%s", light_id, rgb)
-        if owner and self._preferred_owner() == owner:
-            self._schedule_reconcile()
-        elif (
-            not self.is_streaming
-            and self._transition_task is None
-            and not self._logged_no_stream
-            and time.monotonic() >= self._regrab_block_until
+        slot = self._slot_for(owner)
+        if slot is not None and self._preferred_owner(slot) == owner:
+            self._schedule_reconcile(slot)
+        elif not self._logged_no_stream and (
+            slot is None
+            or (
+                not slot.is_streaming
+                and slot.transition_task is None
+                and now >= slot.regrab_block_until
+            )
         ):
             self._logged_no_stream = True
             user = paired_user(self._store, owner)
@@ -185,16 +158,17 @@ class Engine:
 
         :param owner: The paired username activating the stream.
         :return: True when the virtual bridge can accept the request; False when another active
-            TV has equal or higher priority.
+            TV on the same output has equal or higher priority.
         """
         user = paired_user(self._store, owner)
         if user is None:
             return False
         self._last_updates[owner] = time.monotonic()
         self._remember_request(owner)
-        if not self._owner_ready(owner):
+        slot = self._slot_for(owner)
+        if slot is None or not self._owner_ready(owner):
             return True
-        preferred = self._preferred_owner()
+        preferred = self._preferred_owner(slot)
         if preferred != owner:
             LOGGER.warning(
                 "Denying entertainment stream for %s: %s has equal or higher priority",
@@ -202,7 +176,7 @@ class Engine:
                 preferred,
             )
             return False
-        self._schedule_reconcile()
+        self._schedule_reconcile(slot)
         return True
 
     def release_stream(self, owner: str) -> None:
@@ -210,18 +184,19 @@ class Engine:
         self._active_owners.discard(owner)
         self._request_order.pop(owner, None)
         self._identify.pop(owner, None)
-        if self._stream_owner == owner and self._preferred_owner() is not None:
-            self._schedule_reconcile()
+        slot = self._owned_slot(owner)
+        if slot is not None and self._preferred_owner(slot) is not None:
+            self._schedule_reconcile(slot)
 
     def tv_settings_changed(self, owner: str) -> None:
-        """Re-evaluate ownership after a TV's enabled state or priority changes."""
+        """Re-evaluate ownership after a TV's enabled state, priority, or target changes."""
         now = time.monotonic()
         if (
             owner in self._active_owners
             and now - self._last_updates.get(owner, 0.0) < IDLE_TIMEOUT_S
         ):
             self._last_updates[owner] = now
-        self._schedule_reconcile()
+        self._schedule_reconcile_all()
 
     async def remove_tv(self, owner: str) -> None:
         """Forget a removed TV and stop or hand off its outbound stream."""
@@ -230,10 +205,10 @@ class Engine:
         self._last_updates.pop(owner, None)
         self._owner_buffers.pop(owner, None)
         self._identify.pop(owner, None)
-        if self._stream_owner == owner:
+        if self._owned_slot(owner) is not None:
             await self.stop_stream(owner)
-        else:
-            self._schedule_reconcile()
+        # The removed TV may have linked other Zigbee TVs' lamps into one output.
+        self._schedule_reconcile_all()
 
     async def stop_stream(self, owner: str | None = None) -> None:
         """Stop one TV's outbound stream, or all streaming when owner is omitted."""
@@ -241,26 +216,26 @@ class Engine:
             await self.stop()
             return
         self.release_stream(owner)
-        if self._stream_owner != owner:
+        slot = self._owned_slot(owner)
+        if slot is None:
             return
-        self._stream_gen += 1
-        await self._cancel_transition()
-        await self._teardown()
-        self._schedule_reconcile()
+        await self._stop_slot(slot)
+        self._schedule_reconcile(slot)
 
     async def restart_stream(self, owner: str) -> None:
         """Restart a TV's active stream so changed stream settings (target, lights) apply now."""
-        if self._stream_owner != owner or self._restarting:
+        slot = self._owned_slot(owner)
+        if slot is None or slot.restarting:
             return
-        self._restarting = True
+        slot.restarting = True
         try:
-            self._stream_gen += 1
-            await self._cancel_transition()
+            slot.gen += 1
+            await slot.cancel_transition()
             # The teardown runs as the ownership transition, so frames arriving while the old
             # backend closes (restoring Zigbee lamps) can't start a replacement alongside it.
-            self._transition_task = asyncio.create_task(self._restart())
+            slot.transition_task = asyncio.create_task(self._restart(slot))
         finally:
-            self._restarting = False
+            slot.restarting = False
 
     def identify(self, owner: str, light_id: str, *, sustained: bool = False) -> None:
         """
@@ -276,12 +251,13 @@ class Engine:
         now = time.monotonic()
         self._last_updates[owner] = now
         self._remember_request(owner)
-        if self._preferred_owner() != owner:
+        slot = self._slot_for(owner)
+        if slot is None or self._preferred_owner(slot) != owner:
             return
         self._identify.setdefault(owner, {})[light_id] = now + (
             _IDENTIFY_LSELECT_S if sustained else _IDENTIFY_SELECT_S
         )
-        self._schedule_reconcile()
+        self._schedule_reconcile(slot)
 
     def stop_identify(self, light_id: str) -> None:
         """Cancel a light's identify blink (the TV's alert 'none')."""
@@ -289,12 +265,10 @@ class Engine:
             lights.pop(light_id, None)
 
     async def stop(self) -> None:
-        """Stop the outbound stream and any background tasks."""
+        """Stop every outbound stream and any background tasks."""
         self._active_owners.clear()
         self._request_order.clear()
-        self._stream_gen += 1
-        await self._cancel_transition()
-        await self._teardown()
+        await asyncio.gather(*(self._stop_slot(slot) for slot in self._slots.values()))
 
     def _remember_request(self, owner: str) -> None:
         """Track a TV's active stream intent without changing the order on every frame."""
@@ -316,19 +290,23 @@ class Engine:
         area, _ = tv_stream_target(self._store, owner)
         return bool(area)
 
-    def _preferred_owner(self) -> str | None:
-        """Return the highest-priority active, ready TV; preserve the current owner on ties."""
+    def _owner_ready_for(self, owner: str, slot: _StreamSlot) -> bool:
+        """Return whether a TV is ready to stream and its output is the slot's."""
+        return _resource_key(self._store, owner) == slot.key and self._owner_ready(owner)
+
+    def _preferred_owner(self, slot: _StreamSlot) -> str | None:
+        """Return the slot's highest-priority active, ready TV; preserve its owner on ties."""
         now = time.monotonic()
         candidates = [
             owner
             for owner in self._active_owners
             if now - self._last_updates.get(owner, 0.0) < IDLE_TIMEOUT_S
-            and self._owner_ready(owner)
+            and self._owner_ready_for(owner, slot)
         ]
         if not candidates:
             return None
         highest = max(self._priority(owner) for owner in candidates)
-        current = self._stream_owner
+        current = slot.owner
         if current in candidates and self._priority(current) == highest:
             return current
         return min(
@@ -341,112 +319,129 @@ class Engine:
         user = paired_user(self._store, owner)
         return user.stream_priority if user is not None else 0
 
-    def _schedule_reconcile(self) -> None:
+    def _slot_for(self, owner: str) -> _StreamSlot | None:
+        """Return the stream slot of a TV's output (created on first use), or None without one."""
+        key = _resource_key(self._store, owner)
+        if key is None:
+            return None
+        slot = self._slots.get(key)
+        if slot is None:
+            slot = self._slots[key] = _StreamSlot(key)
+        return slot
+
+    def _owned_slot(self, owner: str) -> _StreamSlot | None:
+        """Return the slot whose active or opening stream a TV owns, or None."""
+        return next((slot for slot in self._slots.values() if slot.owner == owner), None)
+
+    def _held_elsewhere(self, owner: str, slot: _StreamSlot) -> bool:
+        """Return whether a TV still owns, or is still closing, a stream on another output."""
+        return any(
+            other is not slot
+            and (
+                other.owner == owner
+                or (
+                    other.closing_owner == owner
+                    and other.closing is not None
+                    and not other.closing.done()
+                )
+            )
+            for other in self._slots.values()
+        )
+
+    def _schedule_reconcile_all(self) -> None:
+        """Schedule reconciliation of every output, including any an active TV just moved to."""
+        for owner in self._active_owners:
+            self._slot_for(owner)
+        for slot in self._slots.values():
+            self._schedule_reconcile(slot)
+
+    def _schedule_reconcile(self, slot: _StreamSlot) -> None:
         """Schedule serialized ownership reconciliation without blocking request handlers."""
-        desired = self._preferred_owner()
-        current = self._stream_owner
-        if self._transition_task is not None:
+        desired = self._preferred_owner(slot)
+        current = slot.owner
+        if slot.transition_task is not None:
             if current is not None and (
-                not self._owner_ready(current) or (desired is not None and desired != current)
+                not self._owner_ready_for(current, slot)
+                or (desired is not None and desired != current)
             ):
-                self._stream_gen += 1
+                slot.gen += 1
             return
-        if self.is_streaming and current is not None and current == desired:
+        if slot.is_streaming and current is not None and current == desired:
             return
-        if current is None and time.monotonic() < self._regrab_block_until:
+        if current is None and (
+            desired is None
+            or time.monotonic() < slot.regrab_block_until
+            or self._held_elsewhere(desired, slot)
+        ):
             return
-        self._transition_task = asyncio.create_task(self._reconcile())
+        slot.transition_task = asyncio.create_task(self._reconcile(slot))
 
-    async def _cancel_transition(self) -> None:
-        """Cancel and await an in-flight ownership transition."""
-        task = self._transition_task
-        if task is None or task is asyncio.current_task():
-            return
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
-        self._transition_task = None
-
-    async def _reconcile(self) -> None:
-        """Stop, start, or hand off the single outbound stream to the preferred TV."""
+    async def _reconcile(self, slot: _StreamSlot) -> None:
+        """Stop, start, or hand off one output's stream to its preferred TV."""
         try:
             while True:
-                desired = self._preferred_owner()
-                current = self._stream_owner
-                if current is not None and not self._owner_ready(current):
-                    self._stream_gen += 1
-                    await self._teardown()
+                desired = self._preferred_owner(slot)
+                current = slot.owner
+                if current is not None and not self._owner_ready_for(current, slot):
+                    slot.gen += 1
+                    await self._teardown(slot)
                     continue
                 if desired is None:
                     return
                 if current is not None and current != desired:
-                    self._stream_gen += 1
-                    await self._teardown()
+                    slot.gen += 1
+                    await self._teardown(slot)
                     continue
-                if current is not None and self._backend is not None and not self.is_streaming:
+                if current is not None and slot.backend is not None and not slot.is_streaming:
                     # The stream died before its ticker noticed: tear it down here first, so
                     # the restart below never races the ticker's own teardown.
-                    self._stream_gen += 1
-                    await self._teardown()
+                    slot.gen += 1
+                    await self._teardown(slot)
                     continue
-                if self.is_streaming:
+                if slot.is_streaming:
                     return
-                if time.monotonic() < self._regrab_block_until:
+                if time.monotonic() < slot.regrab_block_until:
                     return
                 if current is None:
-                    self._stream_owner = desired
-                self._buffer = self._owner_buffers.setdefault(desired, ColorBuffer())
-                started = await self._open_stream(desired)
+                    # A TV moving here from another output waits until its stream there has closed.
+                    if self._held_elsewhere(desired, slot):
+                        return
+                    slot.owner = desired
+                slot.buffer = self._owner_buffers.setdefault(desired, ColorBuffer())
+                started = await self._open_stream(slot, desired)
                 if started:
                     continue
-                if self._preferred_owner() != desired:
+                if self._preferred_owner(slot) != desired:
                     continue
                 return
         finally:
-            self._transition_task = None
+            slot.transition_task = None
 
-    async def _restart(self) -> None:
-        """Tear the active stream down, then reconcile; runs as the transition task."""
+    async def _restart(self, slot: _StreamSlot) -> None:
+        """Tear the slot's active stream down, then reconcile; runs as its transition task."""
         try:
-            await self._teardown()
+            await self._teardown(slot)
         except BaseException:
-            self._transition_task = None
+            slot.transition_task = None
             raise
-        await self._reconcile()
+        # A TV whose target moved to another output resumes there now its old stream is closed.
+        self._schedule_reconcile_all()
+        await self._reconcile(slot)
 
-    def _apply_smoothing(self, lights: list[VirtualLight]) -> None:
-        """
-        Ease each light's streamed color toward its latest target color.
+    async def _stop_slot(self, slot: _StreamSlot) -> None:
+        """Stop a slot's stream, discarding any start still in flight."""
+        slot.gen += 1
+        await slot.cancel_transition()
+        await self._teardown(slot)
 
-        Writes the result into the smoothed buffer the mapper reads, turning the TV's abrupt
-        color steps into fades.
-        """
-        smoothing = max(0.0, min(MAX_STREAM_SMOOTHING, self._resolve_smoothing()))
-        for light in lights:
-            target = self._buffer.get_color(light.id)
-            current = self._smoothed_float.get(light.id)
-            if current is None or smoothing <= 0.0:
-                # First sight (or smoothing off): jump to the target, no fade-from-black.
-                eased = (float(target[0]), float(target[1]), float(target[2]))
-            else:
-                eased = (
-                    smoothing * current[0] + (1.0 - smoothing) * target[0],
-                    smoothing * current[1] + (1.0 - smoothing) * target[1],
-                    smoothing * current[2] + (1.0 - smoothing) * target[2],
-                )
-            self._smoothed_float[light.id] = eased
-            self._smoothed_buffer.set_color(
-                light.id, (round(eased[0]), round(eased[1]), round(eased[2]))
-            )
-
-    def _resolve_smoothing(self) -> float:
-        """Return the owning TV's smoothing setting, or 0.0 (off) when it has none."""
-        user = paired_user(self._store, self._stream_owner)
+    def _resolve_smoothing(self, owner: str) -> float:
+        """Return a TV's smoothing setting, or 0.0 (off) when it has none."""
+        user = paired_user(self._store, owner)
         if user is not None and user.stream_smoothing is not None:
             return user.stream_smoothing
         return 0.0
 
-    def _apply_identify(self, owner: str) -> None:
+    def _apply_identify(self, slot: _StreamSlot, owner: str) -> None:
         """Overlay a full-white blink on lights the TV asked to identify; expire finished ones."""
         identified = self._identify.get(owner)
         if not identified:
@@ -461,7 +456,7 @@ class Engine:
         self._last_updates[owner] = now
         rgb = _IDENTIFY_RGB if int(now * 2 * _IDENTIFY_BLINK_HZ) % 2 == 0 else (0, 0, 0)
         for light_id in identified:
-            self._smoothed_buffer.set_color(light_id, rgb)
+            slot.smoothed_buffer.set_color(light_id, rgb)
 
     def _create_backend(self, user: PairedUser) -> tuple[OutputBackend, str] | None:
         """
@@ -478,20 +473,18 @@ class Engine:
         area = user.entertainment_area
         return HueBridgeBackend(bridge, area), f"{bridge.host} area {area}"
 
-    async def _open_stream(self, owner: str) -> bool:
+    async def _open_stream(self, slot: _StreamSlot, owner: str) -> bool:
         """Open the output stream for one TV and start its ticker."""
-        gen = self._stream_gen
+        gen = slot.gen
         # Never overlap a previous backend that is still closing (restoring its lamps).
         with suppress(Exception):
-            await self._wait_for_close()
+            await slot.wait_for_close()
         user = paired_user(self._store, owner)
         # The TV may have been disabled or preempted while we waited (that bumps the gen).
-        created = (
-            self._create_backend(user) if user is not None and gen == self._stream_gen else None
-        )
+        created = self._create_backend(user) if user is not None and gen == slot.gen else None
         if user is None or created is None:
-            if self._stream_owner == owner:
-                self._stream_owner = None
+            if slot.owner == owner:
+                slot.owner = None
             return False
         backend, target = created
         lights = user.lights
@@ -502,75 +495,201 @@ class Engine:
             # stop() cancelled us mid-connect. If the cancel landed after backend.start() had
             # already activated the area on the bridge (its pre-DTLS HTTP PUT), the backend is
             # orphaned here - close it so the area is deactivated and the HTTP session released.
-            self._closing = asyncio.create_task(backend.aclose())
+            slot.closing = asyncio.create_task(backend.aclose())
+            slot.closing_owner = owner
             with suppress(Exception):
-                await self._wait_for_close()
+                await slot.wait_for_close()
             raise
         except Exception:
             LOGGER.exception("Failed to start outbound stream to %s", target)
-            self._regrab_block_until = time.monotonic() + _START_RETRY_BACKOFF_S
+            slot.regrab_block_until = time.monotonic() + _START_RETRY_BACKOFF_S
             with suppress(Exception):
                 await backend.aclose()
-            if self._stream_owner == owner:
-                self._stream_owner = None
+            if slot.owner == owner:
+                slot.owner = None
             return False
         else:
-            if gen != self._stream_gen:
+            if gen != slot.gen:
                 LOGGER.info(
                     "Discarding outbound stream to %s: ownership changed mid-connect", target
                 )
                 await backend.aclose()
-                if self._stream_owner == owner:
-                    self._stream_owner = None
+                if slot.owner == owner:
+                    slot.owner = None
                 return False
-            self._backend = backend
-            self._stream_lights = lights
-            self._remote_dead = False
-            self._ticker = asyncio.create_task(self._run_ticker(owner))
-            self._health_task = asyncio.create_task(self._run_health(owner, backend))
+            slot.backend = backend
+            slot.lights = lights
+            slot.remote_dead = False
+            slot.ticker = asyncio.create_task(self._run_ticker(slot, owner))
+            slot.health_task = asyncio.create_task(slot.run_health(owner, backend))
             LOGGER.info("Outbound stream started to %s", target)
             return True
 
-    async def _run_ticker(self, owner: str) -> None:
-        """Send the buffered colors to the bridge at a fixed rate until inactivity."""
+    async def _run_ticker(self, slot: _StreamSlot, owner: str) -> None:
+        """Send the buffered colors to the output at a fixed rate until inactivity."""
         try:
             while time.monotonic() - self._last_updates.get(owner, 0.0) < IDLE_TIMEOUT_S:
-                backend = self._backend
+                backend = slot.backend
                 if (
-                    self._stream_owner != owner
-                    or self._remote_dead
+                    slot.owner != owner
+                    or slot.remote_dead
                     or backend is None
                     or not backend.is_streaming
                 ):
                     break
-                self._apply_smoothing(self._stream_lights)
-                self._apply_identify(owner)
-                commands = map_to_commands(self._stream_lights, self._smoothed_buffer)
+                slot.apply_smoothing(slot.lights, self._resolve_smoothing(owner))
+                self._apply_identify(slot, owner)
+                commands = map_to_commands(slot.lights, slot.smoothed_buffer)
                 if commands:
-                    if not self._logged_tick:
-                        self._logged_tick = True
+                    if not slot.logged_tick:
+                        slot.logged_tick = True
                         LOGGER.info(
                             "First outbound frame: %d command(s) channels=%s",
                             len(commands),
                             [command.channel_id for command in commands],
                         )
                     backend.send(commands)
-                elif not self._logged_empty:
-                    self._logged_empty = True
+                elif not slot.logged_empty:
+                    slot.logged_empty = True
                     LOGGER.warning(
                         "Ticker produced 0 commands (lights=%d) - nothing to stream",
-                        len(self._stream_lights),
+                        len(slot.lights),
                     )
                 await asyncio.sleep(self._interval)
         finally:
-            if self._stream_owner == owner:
+            if slot.owner == owner:
                 # A start already in flight for this owner must discard itself, not adopt the
                 # slot this teardown is clearing.
-                self._stream_gen += 1
-                await self._teardown()
+                slot.gen += 1
+                await self._teardown(slot)
                 LOGGER.info("Outbound stream stopped")
 
-    async def _run_health(self, owner: str, tracked_backend: OutputBackend) -> None:
+    async def _teardown(self, slot: _StreamSlot) -> None:
+        """Stop the slot's ticker, the health monitor, and close the output backend."""
+        ticker = slot.ticker
+        slot.ticker = None
+        if ticker is not None and ticker is not asyncio.current_task():
+            ticker.cancel()
+            with suppress(asyncio.CancelledError):
+                await ticker
+        health = slot.health_task
+        slot.health_task = None
+        if health is not None and health is not asyncio.current_task():
+            health.cancel()
+            with suppress(asyncio.CancelledError):
+                await health
+        backend = slot.backend
+        owner = slot.owner
+        slot.backend = None
+        slot.owner = None
+        slot.lights = []
+        slot.smoothed_float.clear()
+        if owner is not None:
+            self._identify.pop(owner, None)
+        # Reset per-stream state so the next stream starts clean. The re-grab backoff persists
+        # (it intentionally outlives the torn-down session it was set for).
+        slot.remote_dead = False
+        slot.logged_tick = False
+        slot.logged_empty = False
+        self._logged_no_stream = False
+        if backend is not None:
+            # Closing restores Zigbee lamps: it runs on even when this teardown is cancelled, and
+            # the next stream (or shutdown) waits for it.
+            slot.closing = asyncio.create_task(backend.aclose())
+            slot.closing_owner = owner
+        await slot.wait_for_close()
+
+
+class _StreamSlot:
+    """The outbound stream to one exclusive output, shared by the TVs that target it."""
+
+    def __init__(self, key: str) -> None:
+        """
+        Initialize an idle slot.
+
+        :param key: The output's resource key (see ``_resource_key``).
+        """
+        self.key = key
+        # The owning TV's inbound colors, which the smoothing eases toward.
+        self.buffer = ColorBuffer()
+        # Smoothed (eased) colors actually streamed to the bridge: float state for precision
+        # plus an int buffer the mapper reads, so abrupt TV color jumps become fades.
+        self.smoothed_float: dict[str, tuple[float, float, float]] = {}
+        self.smoothed_buffer = ColorBuffer()
+        self.backend: OutputBackend | None = None
+        # A torn-down backend's close (for Zigbee: restoring the lamps) still in progress, and
+        # the TV it streamed for.
+        self.closing: asyncio.Task[None] | None = None
+        self.closing_owner: str | None = None
+        # True while restart_stream() replaces the transition; concurrent restarts coalesce.
+        self.restarting = False
+        self.ticker: asyncio.Task[None] | None = None
+        self.health_task: asyncio.Task[None] | None = None
+        self.transition_task: asyncio.Task[None] | None = None
+        # Monotonic time before which a new stream won't be opened (set when another controller
+        # took the area over, so we back off rather than fight it, or after a failed start).
+        self.regrab_block_until = 0.0
+        # Set by the health monitor when the bridge has ended our stream; the ticker watches it
+        # and tears down (keeping teardown a single-owner path).
+        self.remote_dead = False
+        # Username (paired TV) that owns the active or currently-opening outbound stream.
+        self.owner: str | None = None
+        # The lights mapped for the active stream (the owning TV's assigned lights), resolved
+        # when the stream starts. Cleared on teardown.
+        self.lights: list[VirtualLight] = []
+        # Monotonic token bumped on every stop. The (slow, ~seconds) DTLS connect to the real
+        # bridge is not reliably cancellable, so a start that completes after a stop checks this
+        # to discard itself instead of leaving a zombie stream behind.
+        self.gen = 0
+        # One-shot diagnostic flags so the ticker logs its first frame out (or that it has
+        # nothing to send) without per-frame spam.
+        self.logged_tick = False
+        self.logged_empty = False
+
+    @property
+    def is_streaming(self) -> bool:
+        """Return True while the slot's outbound stream is active."""
+        return self.backend is not None and self.backend.is_streaming
+
+    async def cancel_transition(self) -> None:
+        """Cancel and await an in-flight ownership transition."""
+        task = self.transition_task
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        self.transition_task = None
+
+    def apply_smoothing(self, lights: list[VirtualLight], smoothing: float) -> None:
+        """
+        Ease each light's streamed color toward its latest target color.
+
+        Writes the result into the smoothed buffer the mapper reads, turning the TV's abrupt
+        color steps into fades.
+
+        :param lights: The lights to ease.
+        :param smoothing: The owning TV's smoothing setting (0.0 = off).
+        """
+        smoothing = max(0.0, min(MAX_STREAM_SMOOTHING, smoothing))
+        for light in lights:
+            target = self.buffer.get_color(light.id)
+            current = self.smoothed_float.get(light.id)
+            if current is None or smoothing <= 0.0:
+                # First sight (or smoothing off): jump to the target, no fade-from-black.
+                eased = (float(target[0]), float(target[1]), float(target[2]))
+            else:
+                eased = (
+                    smoothing * current[0] + (1.0 - smoothing) * target[0],
+                    smoothing * current[1] + (1.0 - smoothing) * target[1],
+                    smoothing * current[2] + (1.0 - smoothing) * target[2],
+                )
+            self.smoothed_float[light.id] = eased
+            self.smoothed_buffer.set_color(
+                light.id, (round(eased[0]), round(eased[1]), round(eased[2]))
+            )
+
+    async def run_health(self, owner: str, tracked_backend: OutputBackend) -> None:
         """
         Poll the bridge's view of our stream and flag it dead if the bridge silently ended it.
 
@@ -582,12 +701,12 @@ class Engine:
         fails = 0
         while True:
             await asyncio.sleep(_HEALTH_POLL_S)
-            backend = self._backend
+            backend = self.backend
             if (
-                self._stream_owner != owner
+                self.owner != owner
                 or backend is not tracked_backend
                 or not backend.is_streaming
-                or self._remote_dead
+                or self.remote_dead
             ):
                 return
             try:
@@ -603,55 +722,58 @@ class Engine:
                 continue
             if health is BackendHealth.TAKEN_OVER:
                 # A different controller owns the area now - back off, don't fight it.
-                self._regrab_block_until = time.monotonic() + _FOREIGN_BACKOFF_S
+                self.regrab_block_until = time.monotonic() + _FOREIGN_BACKOFF_S
                 LOGGER.warning(
                     "Bridge entertainment taken over by another streamer; backing off %.0fs",
                     _FOREIGN_BACKOFF_S,
                 )
             else:
                 LOGGER.warning("Bridge ended the entertainment session; tearing down to recover")
-            self._remote_dead = True
+            self.remote_dead = True
             return
 
-    async def _teardown(self) -> None:
-        """Stop the ticker, the health monitor, and close the output backend."""
-        ticker = self._ticker
-        self._ticker = None
-        if ticker is not None and ticker is not asyncio.current_task():
-            ticker.cancel()
-            with suppress(asyncio.CancelledError):
-                await ticker
-        health = self._health_task
-        self._health_task = None
-        if health is not None and health is not asyncio.current_task():
-            health.cancel()
-            with suppress(asyncio.CancelledError):
-                await health
-        backend = self._backend
-        self._backend = None
-        self._stream_owner = None
-        self._stream_lights = []
-        self._smoothed_float.clear()
-        self._identify.clear()
-        # Reset per-stream state so the next stream starts clean. The re-grab backoff persists
-        # (it intentionally outlives the torn-down session it was set for).
-        self._remote_dead = False
-        self._logged_tick = False
-        self._logged_empty = False
-        self._logged_no_stream = False
-        if backend is not None:
-            # Closing restores Zigbee lamps: it runs on even when this teardown is cancelled, and
-            # the next stream (or shutdown) waits for it.
-            self._closing = asyncio.create_task(backend.aclose())
-        await self._wait_for_close()
-
-    async def _wait_for_close(self) -> None:
+    async def wait_for_close(self) -> None:
         """Wait for a backend close still in progress; it keeps running if we are cancelled."""
-        closing = self._closing
+        closing = self.closing
         if closing is None:
             return
         try:
             await asyncio.shield(closing)
         finally:
-            if closing.done() and self._closing is closing:
-                self._closing = None
+            if closing.done() and self.closing is closing:
+                self.closing = None
+
+
+def _resource_key(store: ConfigStore, owner: str) -> str | None:
+    """
+    Return the exclusive output a TV streams to, or None when it has no usable target.
+
+    A Hue bridge runs one entertainment stream at a time, so all its TVs share one key. A Zigbee
+    TV's lamps are its own output, unless they overlap another Zigbee TV's lamps: TVs linked by
+    a shared lamp (directly or through other TVs) share one key.
+    """
+    user = paired_user(store, owner)
+    if user is None:
+        return None
+    if user.target is not StreamTarget.ZIGBEE:
+        bridge = active_bridge(store)
+        return f"hue:{bridge.id}" if bridge is not None else None
+    lamps = {lamp.ieee.lower() for lamp in user.zigbee_lights}
+    if not lamps:
+        return None
+    others = [
+        (other.username, {lamp.ieee.lower() for lamp in other.zigbee_lights})
+        for other in store.config.users
+        if other.target is StreamTarget.ZIGBEE and other is not user
+    ]
+    group = {user.username}
+    grown = True
+    while grown:
+        grown = False
+        for username, other_lamps in others:
+            if username not in group and not lamps.isdisjoint(other_lamps):
+                group.add(username)
+                lamps |= other_lamps
+                grown = True
+    # Named after a TV rather than a lamp, so editing a TV's own lamps keeps it on its slot.
+    return f"zigbee:{min(group)}"
