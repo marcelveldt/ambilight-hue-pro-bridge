@@ -7,12 +7,19 @@ import time
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
-from ambilight_hue_bridge.config.models import PairedUser, RealBridge, VirtualLight
+from ambilight_hue_bridge.config.models import (
+    PairedUser,
+    RealBridge,
+    StreamTarget,
+    VirtualLight,
+    ZigbeeLightRef,
+)
 from ambilight_hue_bridge.config.store import ConfigStore
 from ambilight_hue_bridge.engine.engine import Engine
 from ambilight_hue_bridge.engine.ingest import ColorBuffer
 from ambilight_hue_bridge.engine.mapping import map_to_commands
-from ambilight_hue_bridge.outbound.backend import BackendHealth, HueBridgeBackend
+from ambilight_hue_bridge.outbound.backend import BackendHealth, HueBridgeBackend, ZigbeeBackend
+from ambilight_hue_bridge.outbound.controller import lights_from_zigbee
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -592,7 +599,7 @@ async def _stream_with_health(
     tmp_path: Path, monkeypatch, script: list[BackendHealth | Exception]
 ) -> tuple[Engine, _ScriptedBackend]:
     backend = _ScriptedBackend(script)
-    monkeypatch.setattr(Engine, "_create_backend", lambda _self, _bridge, _area: backend)
+    monkeypatch.setattr(Engine, "_create_backend", lambda _self, _user: (backend, "scripted"))
     monkeypatch.setattr("ambilight_hue_bridge.engine.engine._HEALTH_POLL_S", 0.02)
     engine = Engine(_configured_store(tmp_path), rate_hz=100)
     engine.submit_color("tv1", "1", (65535, 0, 0))
@@ -624,6 +631,178 @@ async def test_health_ok_between_misses_keeps_streaming(tmp_path: Path, monkeypa
     await engine.stop()
 
 
+class _SlowBackend(_ScriptedBackend):
+    """Healthy backend whose start and close take a while, like a real one."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.frames = 0
+        self.closed = False
+        self.started_at = 0.0
+        self.closed_at = 0.0
+
+    async def start(self) -> None:
+        await asyncio.sleep(0.1)
+        self.streaming = True
+        self.started_at = time.monotonic()
+
+    def send(self, _commands: object) -> None:
+        self.frames += 1
+
+    async def aclose(self) -> None:
+        self.streaming = False
+        await asyncio.sleep(0.2)
+        self.closed = True
+        self.closed_at = time.monotonic()
+
+
+async def test_lost_stream_restarts_while_the_tv_keeps_sending(tmp_path: Path, monkeypatch) -> None:
+    """A stream that dies under a busy TV is replaced cleanly: one owner, frames flowing."""
+    backends: list[_SlowBackend] = []
+
+    def create(_self: Engine, _user: object) -> tuple[_SlowBackend, str]:
+        backends.append(_SlowBackend())
+        return backends[-1], "slow"
+
+    monkeypatch.setattr(Engine, "_create_backend", create)
+    engine = Engine(_configured_store(tmp_path), rate_hz=50)
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    assert await _wait_until(lambda: engine.is_streaming)
+    backends[0].streaming = False  # the transport dropped
+    for _ in range(40):
+        engine.submit_color("tv1", "1", (65535, 0, 0))
+        await asyncio.sleep(0.02)
+    assert engine.stream_owner == "tv1"
+    assert engine.is_streaming
+    live = [backend for backend in backends if backend.streaming]
+    assert len(live) == 1
+    assert backends[0].closed
+    frames = live[0].frames
+    await asyncio.sleep(0.1)
+    assert live[0].frames > frames
+    await engine.stop_stream("tv1")
+    assert not engine.is_streaming
+    assert live[0].closed
+
+
+async def test_restart_stream_reopens_the_active_stream(tmp_path: Path, monkeypatch) -> None:
+    """restart_stream() replaces the owner's backend so new stream settings apply now."""
+    backends: list[_SlowBackend] = []
+
+    def create(_self: Engine, _user: object) -> tuple[_SlowBackend, str]:
+        backends.append(_SlowBackend())
+        return backends[-1], "slow"
+
+    monkeypatch.setattr(Engine, "_create_backend", create)
+    engine = Engine(_configured_store(tmp_path), rate_hz=50)
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    assert await _wait_until(lambda: engine.is_streaming)
+    restart = asyncio.create_task(engine.restart_stream("tv1"))
+    # The TV keeps sending while the old backend closes: no replacement may start before that.
+    for _ in range(20):
+        engine.submit_color("tv1", "1", (65535, 0, 0))
+        await asyncio.sleep(0.02)
+    await restart
+    assert await _wait_until(lambda: len(backends) == 2 and engine.is_streaming)
+    assert backends[0].closed
+    assert backends[1].started_at >= backends[0].closed_at
+    assert engine.stream_owner == "tv1"
+    await engine.restart_stream("someone-else")  # not the owner: nothing happens
+    assert len(backends) == 2
+    await engine.stop()
+
+
+async def test_stop_during_a_restart_lets_the_close_finish(tmp_path: Path, monkeypatch) -> None:
+    """Shutting down while a restart closes the old backend still lets that close complete."""
+    backends: list[_SlowBackend] = []
+
+    def create(_self: Engine, _user: object) -> tuple[_SlowBackend, str]:
+        backends.append(_SlowBackend())
+        return backends[-1], "slow"
+
+    monkeypatch.setattr(Engine, "_create_backend", create)
+    engine = Engine(_configured_store(tmp_path), rate_hz=50)
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    assert await _wait_until(lambda: engine.is_streaming)
+    await engine.restart_stream("tv1")
+    await asyncio.sleep(0.05)  # the old backend is now closing
+    await engine.stop()
+    assert backends[0].closed
+
+
+async def test_concurrent_restarts_during_startup_coalesce(tmp_path: Path, monkeypatch) -> None:
+    """Two restarts racing a stream start close the starting backend once and open one stream."""
+    backends: list[_SlowBackend] = []
+
+    def create(_self: Engine, _user: object) -> tuple[_SlowBackend, str]:
+        backends.append(_SlowBackend())
+        return backends[-1], "slow"
+
+    monkeypatch.setattr(Engine, "_create_backend", create)
+    engine = Engine(_configured_store(tmp_path), rate_hz=50)
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    assert await _wait_until(lambda: len(backends) == 1)  # its start() is now in progress
+    await asyncio.gather(engine.restart_stream("tv1"), engine.restart_stream("tv1"))
+    for _ in range(25):
+        engine.submit_color("tv1", "1", (65535, 0, 0))
+        await asyncio.sleep(0.02)
+    assert await _wait_until(lambda: engine.is_streaming)
+    assert await _wait_until(lambda: backends[0].closed)
+    live = [backend for backend in backends if backend.streaming]
+    assert len(live) == 1
+    assert live[0].started_at >= backends[0].closed_at
+    await engine.stop()
+
+
+async def test_open_rechecks_ownership_after_waiting_for_a_close(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A TV disabled while its stream waits for an earlier close never gets a backend."""
+    backends: list[_SlowBackend] = []
+
+    def create(_self: Engine, _user: object) -> tuple[_SlowBackend, str]:
+        backends.append(_SlowBackend())
+        return backends[-1], "slow"
+
+    monkeypatch.setattr(Engine, "_create_backend", create)
+    store = _configured_store(tmp_path)
+    engine = Engine(store, rate_hz=50)
+    release = asyncio.Event()
+    engine._closing = asyncio.create_task(release.wait())  # an earlier backend still closing
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    await asyncio.sleep(0.05)  # the new stream now waits for that close
+    store.config.users[0].enabled = False
+    engine.tv_settings_changed("tv1")
+    release.set()
+    await asyncio.sleep(0.1)
+    assert backends == []
+    assert engine.stream_owner is None
+    await engine.stop()
+
+
+async def test_failed_start_backs_off_before_retrying(tmp_path: Path, monkeypatch) -> None:
+    """A start that fails is retried after a pause, not on every inbound frame."""
+    starts: list[float] = []
+
+    class _FailingBackend(_ScriptedBackend):
+        async def start(self) -> None:
+            starts.append(time.monotonic())
+            msg = "lamps unreachable"
+            raise OSError(msg)
+
+    monkeypatch.setattr(Engine, "_create_backend", lambda _self, _user: (_FailingBackend([]), "x"))
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine._START_RETRY_BACKOFF_S", 0.3)
+    engine = Engine(_configured_store(tmp_path), rate_hz=100)
+    for _ in range(10):
+        engine.submit_color("tv1", "1", (65535, 0, 0))
+        await asyncio.sleep(0.02)
+    assert len(starts) == 1
+    await asyncio.sleep(0.3)
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    assert await _wait_until(lambda: len(starts) == 2)
+    await engine.stop()
+
+
 async def test_stop_during_cancellable_connect_closes_session(tmp_path: Path, monkeypatch) -> None:
     """A stop whose cancel lands on a cancellable await in start() still closes the session."""
     gate = asyncio.Event()
@@ -651,3 +830,117 @@ async def test_stop_during_cancellable_connect_closes_session(tmp_path: Path, mo
     await engine.stop()
     assert not engine.is_streaming
     assert closed  # the orphaned mid-connect session was closed, not leaked
+
+
+class _FakeHomeAssistant:
+    """Stand-in for HomeAssistantClient: a configured connection with one Ziggurat lamp."""
+
+    def __init__(self, *, available: bool = True) -> None:
+        self.available = available
+
+    async def stream_info(self) -> tuple[str, dict[str, int]]:
+        return "ws://core-ziggurat:9999", {"00:17:88:01:00:00:00:01": 0x1111}
+
+
+class _FakeZigbeeSession:
+    """Stand-in for ZigbeeEntertainmentSession that records sent frames (no real I/O)."""
+
+    def __init__(self, url: str, lights: list[object], *, idle_timeout: float) -> None:
+        self.url = url
+        self.lights = lights
+        self.idle_timeout = idle_timeout
+        self.streaming = False
+        self.closed = False
+        self.frames: list[object] = []
+
+    @property
+    def is_streaming(self) -> bool:
+        return self.streaming
+
+    async def start(self) -> None:
+        self.streaming = True
+
+    def send(self, commands: object) -> None:
+        self.frames.append(commands)
+
+    async def aclose(self) -> None:
+        self.streaming = False
+        self.closed = True
+
+
+def _zigbee_store(tmp_path: Path) -> ConfigStore:
+    """Build a store with one Zigbee-target TV and no Hue bridge at all."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    lamps = [ZigbeeLightRef(ieee="00:17:88:01:00:00:00:01", name="Lamp")]
+    store.config.users = [
+        PairedUser(
+            username="tv1",
+            clientkey="k",
+            devicetype="TV",
+            created="2026-11-10",
+            target=StreamTarget.ZIGBEE,
+            zigbee_lights=lamps,
+            lights=lights_from_zigbee(lamps),
+        ),
+    ]
+    return store
+
+
+async def test_zigbee_tv_streams_without_a_hue_bridge(tmp_path: Path, monkeypatch) -> None:
+    """A Zigbee-target TV streams through the Zigbee backend with no Hue bridge configured."""
+    created: list[_FakeZigbeeSession] = []
+
+    def factory(*args: object, **kwargs: object) -> _FakeZigbeeSession:
+        session = _FakeZigbeeSession(*args, **kwargs)  # type: ignore[arg-type]
+        created.append(session)
+        return session
+
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.ZigbeeEntertainmentSession", factory)
+    engine = Engine(
+        _zigbee_store(tmp_path),
+        rate_hz=100,
+        home_assistant=_FakeHomeAssistant(),  # type: ignore[arg-type]
+    )
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    assert await _wait_until(lambda: bool(created) and bool(created[0].frames))
+    assert isinstance(engine._backend, ZigbeeBackend)
+    assert engine.stream_owner == "tv1"
+    first_frame = created[0].frames[0]
+    assert isinstance(first_frame, list)
+    assert first_frame[0].channel_id == 0
+    assert first_frame[0].red == 65535
+    await engine.stop()
+    assert created[0].closed
+
+
+def test_zigbee_tv_readiness_needs_lamps_and_home_assistant(tmp_path: Path) -> None:
+    """A Zigbee TV is ready when enabled with lamps and a Home Assistant connection."""
+    store = _zigbee_store(tmp_path)
+    home_assistant = _FakeHomeAssistant()
+    engine = Engine(store, home_assistant=home_assistant)  # type: ignore[arg-type]
+    assert engine._owner_ready("tv1")
+    home_assistant.available = False
+    assert not engine._owner_ready("tv1")
+    home_assistant.available = True
+    store.config.users[0].zigbee_lights = []
+    assert not engine._owner_ready("tv1")
+
+
+def test_create_backend_follows_the_tv_target(tmp_path: Path, monkeypatch) -> None:
+    """A Hue-target TV gets the Hue bridge backend, a Zigbee-target TV the Zigbee backend."""
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", _FakeSession)
+    store = _configured_store(tmp_path)
+    engine = Engine(store, home_assistant=_FakeHomeAssistant())  # type: ignore[arg-type]
+    user = store.config.users[0]
+    created = engine._create_backend(user)
+    assert created is not None
+    assert isinstance(created[0], HueBridgeBackend)
+    assert created[1] == "1.2.3.4 area area-1"
+    user.target = StreamTarget.ZIGBEE
+    user.zigbee_lights = [ZigbeeLightRef(ieee="00:17:88:01:00:00:00:01", name="Lamp")]
+    store.config.real_bridges = []
+    created = engine._create_backend(user)
+    assert created is not None
+    assert isinstance(created[0], ZigbeeBackend)
+    assert created[1] == "1 Zigbee lamp(s)"

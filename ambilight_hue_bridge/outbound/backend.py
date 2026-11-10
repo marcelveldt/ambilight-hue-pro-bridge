@@ -3,17 +3,26 @@
 from __future__ import annotations
 
 import logging
+import time
 from enum import StrEnum, auto
 from typing import TYPE_CHECKING, Protocol
 
-from hue_entertainment import EntertainmentSession
+from hue_entertainment import EntertainmentSession, ZigbeeEntertainmentSession, ZigbeeLight
+
+from .homeassistant import HomeAssistantError
 
 if TYPE_CHECKING:
     from hue_entertainment import LightColorCommand
 
-    from ambilight_hue_bridge.config.models import RealBridge
+    from ambilight_hue_bridge.config.models import RealBridge, ZigbeeLightRef
+
+    from .homeassistant import HomeAssistantClient
 
 LOGGER = logging.getLogger(__name__)
+
+# How long a lost Zigbee stream is restarted in place (e.g. while ZHA restarts its Zigbee stack)
+# before it is reported as lost. Restarting the same session keeps the lamps' captured state.
+_ZIGBEE_RECOVERY_S = 60.0
 
 
 class BackendHealth(StrEnum):
@@ -120,3 +129,90 @@ class HueBridgeBackend:
     async def aclose(self) -> None:
         """Stop streaming, deactivate the area and release the HTTP session."""
         await self._session.aclose()
+
+
+class ZigbeeBackend:
+    """Streams straight to Zigbee lamps through ZHA's Ziggurat server, without a Hue bridge."""
+
+    def __init__(self, home_assistant: HomeAssistantClient, lamps: list[ZigbeeLightRef]) -> None:
+        """
+        Initialize the backend (no network I/O until :meth:`start`).
+
+        :param home_assistant: Client resolving the Ziggurat server and the lamps' addresses.
+        :param lamps: The lamps to stream to; each lamp's index is its channel id.
+        """
+        self._home_assistant = home_assistant
+        self._lamps = lamps
+        self._session: ZigbeeEntertainmentSession | None = None
+        self._lost_since: float | None = None
+
+    @property
+    def is_streaming(self) -> bool:
+        """Return True from a successful start until closed, also while recovering a lost stream."""
+        return self._session is not None
+
+    async def start(self) -> None:
+        """
+        Look up the Ziggurat server and the lamps in ZHA, then open the stream.
+
+        Lamps that are no longer in ZHA are skipped.
+
+        :raises HomeAssistantError: When ZHA is unavailable, not on Ziggurat, or has none of the
+            lamps.
+        :raises ZigguratError: When the Ziggurat server can't be reached.
+        """
+        # The network address can change (a lamp rejoining), so resolve it fresh on every start.
+        url, addresses = await self._home_assistant.stream_info()
+        if url is None:
+            msg = "ZHA does not run on a Ziggurat server"
+            raise HomeAssistantError(msg)
+        lights: list[ZigbeeLight] = []
+        for channel_id, lamp in enumerate(self._lamps):
+            nwk = addresses.get(lamp.ieee.lower())
+            if nwk is None:
+                LOGGER.warning(
+                    "Zigbee lamp %s (%s) not found in ZHA; skipping", lamp.name, lamp.ieee
+                )
+                continue
+            lights.append(ZigbeeLight(channel_id, lamp.ieee, nwk, lamp.name))
+        if not lights:
+            msg = "None of the selected Zigbee lamps are in ZHA"
+            raise HomeAssistantError(msg)
+        self._session = ZigbeeEntertainmentSession(url, lights, idle_timeout=0.0)
+        await self._session.start()
+
+    def send(self, commands: list[LightColorCommand]) -> None:
+        """
+        Queue one frame of lamp colors; non-blocking.
+
+        :param commands: One color command per lamp (channel) to update this frame.
+        """
+        if self._session is not None:
+            self._session.send(commands)
+
+    async def check_health(self) -> BackendHealth:
+        """Restart a lost stream in place; return LOST once it stayed down for too long."""
+        session = self._session
+        if session is None or session.is_streaming:
+            self._lost_since = None
+            return BackendHealth.OK
+        now = time.monotonic()
+        if self._lost_since is None:
+            self._lost_since = now
+            LOGGER.warning("Zigbee stream lost; restarting it")
+        try:
+            await session.start()
+        except Exception as err:  # noqa: BLE001 - any failure here means "still down"
+            if now - self._lost_since < _ZIGBEE_RECOVERY_S:
+                LOGGER.debug("Zigbee stream not back yet (%s)", err)
+                return BackendHealth.OK
+            return BackendHealth.LOST
+        LOGGER.info("Zigbee stream restarted")
+        self._lost_since = None
+        return BackendHealth.OK
+
+    async def aclose(self) -> None:
+        """Stop streaming and restore the lamps' state from before the stream."""
+        session, self._session = self._session, None
+        if session is not None:
+            await session.aclose()

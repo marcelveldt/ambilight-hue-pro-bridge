@@ -190,8 +190,9 @@ ambilight_hue_bridge/
 │   ├── ingest.py           # latest-state-wins color buffer; one slot per virtual light
 │   └── mapping.py          # virtual light → real entertainment channel commands
 ├── outbound/
-│   ├── backend.py          # output backends the engine streams through (real Hue bridge)
-│   └── controller.py       # pair/list-areas on the real bridge; per-TV light/area resolution
+│   ├── backend.py          # output backends the engine streams through (Hue bridge, Zigbee)
+│   ├── controller.py       # pair/list-areas on the real bridge; per-TV light/area resolution
+│   └── homeassistant.py    # Home Assistant websocket client: ZHA lamps + the Ziggurat server
 └── web/
     ├── server.py           # JSON config API (/cfg/*) for the SPA
     └── static/             # single-page web UI
@@ -226,6 +227,9 @@ real_bridges:                        # one or more real Hue bridges (V2 square o
     model: "v2"                      # "v2" | "pro" (informational; same code path)
     cached_areas: []                 # last-seen areas; serves the UI while the bridge is down
 active_real_bridge: "192-168-1-50"   # which bridge TVs stream to (empty => the first)
+home_assistant:                      # manual connection for the Zigbee target (unused as add-on)
+  url: "http://homeassistant.local:8123"
+  token: "<long-lived access token>" # write-only in the web UI; never returned by the API
 
 users:                               # paired TVs; each is assigned an area in the web UI
   - username: "<hue v1 username>"
@@ -234,6 +238,7 @@ users:                               # paired TVs; each is assigned an area in t
     created: "2026-06-10T12:00:00"
     enabled: true                    # false keeps the virtual connection but blocks outbound Hue
     stream_priority: 0               # 0..100; higher wins the bridge's single streaming slot
+    target: "hue"                    # "hue" (entertainment area) | "zigbee" (ZHA lamps)
     entertainment_area: "<v2 rid>"   # the real-bridge area this TV drives ("" => no lights)
     split_gradients: true            # expose each gradient zone as its own virtual light
     stream_smoothing: null           # per-TV temporal easing (null/0 = off, capped at 0.95)
@@ -243,6 +248,9 @@ users:                               # paired TVs; each is assigned an area in t
         modelid: "LCX004"
         position: "left"             # informational, for the web UI
         channels: [0]                # real-bridge entertainment channel ids this light drives
+    zigbee_lights:                   # the "zigbee" target's lamps, 1-10; channel id = list index
+      - ieee: "00:17:88:01:0c:bf:17:c8"  # IEEE only: the network address can change
+        name: "Couch lamp"
 ```
 
 Notes: lights resolve **per TV** — a TV with no area (`entertainment_area: ""`) sees no lights
@@ -357,6 +365,31 @@ What's built and verified live against both Ambilight generations:
 - **Engine** — per-TV light↔channel mapping, gradient-zone split, per-TV smoothing, light
   identify (blink over the stream), and a single-active-stream guard.
 - **Web UI** — bridge pairing, per-TV area assignment + smoothing, and TV removal.
+- **Zigbee lights target** — per TV, stream straight to Hue lamps in Home Assistant's ZHA
+  instead of a Hue bridge (below).
+
+### Zigbee lights target
+
+When ZHA runs on a **Ziggurat** radio, `hue-entertainment`'s `ZigbeeEntertainmentSession` joins
+ziggurat-server as an extra websocket client next to ZHA and sends the entertainment frames onto
+the Zigbee network itself. `outbound/homeassistant.py` finds what it needs over Home Assistant's
+websocket API, with one short-lived connection per call (calls are rare: the web UI's lamp list
+and each stream start):
+
+- **Connection** — as an add-on, the Supervisor proxy (`ws://supervisor/core/websocket` with
+  `SUPERVISOR_TOKEN`, via `homeassistant_api: true`); otherwise the configured URL and a
+  long-lived token. `zha/network/settings` needs an administrator.
+- **Lamps** — `zha/devices` filtered to Signify/Philips devices whose `light.*` entity supports a
+  colour mode (`xy`/`hs`/`rgb*`, from one `get_states`), with area names from the area registry.
+- **Ziggurat URL** — `device.path` from `zha/network/settings` when it is a `ws://`/`wss://` URL.
+  That response also holds the network key; only the path is read and nothing of it is logged.
+
+A TV stores its lamps by IEEE address; `ZigbeeBackend` resolves the current network address of
+each on every stream start and skips lamps ZHA no longer has. The TV's virtual lights are one per
+lamp, with the lamp's index as its channel id. The session captures the lamps' state on start and
+restores it on close. A lost stream turns `is_streaming` false, which the engine's ticker already
+treats as a teardown, so the health check always reports OK. A Zigbee TV is ready to stream when
+it has lamps and a Home Assistant connection; no Hue bridge is involved.
 
 The exact older-TV write shape that §1/§8 flag as uncaptured is now largely confirmed from live
 request logs of both TV generations (see the memory/protocol notes).

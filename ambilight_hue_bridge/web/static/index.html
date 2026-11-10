@@ -39,7 +39,8 @@
   <p class="muted" id="intro">
     This service poses as a Philips Hue bridge so your TV's <em>Ambilight+Hue</em> can connect to
     it. Pair your real Hue bridge below, then give each TV an entertainment area to control — the
-    TV arranges those lights around its screen and we forward the colours to your bridge.
+    TV arranges those lights around its screen and we forward the colours to your bridge. With
+    Home Assistant's ZHA on a Ziggurat radio, a TV can instead stream straight to Zigbee lamps.
   </p>
 
   <h2>① Your Hue bridge</h2>
@@ -64,12 +65,43 @@
     lights it drives (positions set in the Hue app are ignored; the TV places them itself). Tick
     <em>split gradient zones</em> to expose each zone of a gradient strip as its own light.
     Enable or disable forwarding per TV and use priority to decide which TV gets the single Hue
-    streaming slot (a higher number wins).
+    streaming slot (a higher number wins). When Home Assistant's ZHA runs on a Ziggurat radio, a
+    TV can stream to <em>Zigbee lights</em> instead: up to 10 Hue colour lamps, driven directly
+    over Zigbee without a Hue bridge and restored to their previous state when streaming stops.
   </p>
   <div id="tvs"><p class="muted">No TVs paired yet — add this bridge from the TV's Ambilight+Hue menu.</p></div>
+
+  <section id="ha-section" hidden>
+    <h2>③ Home Assistant (optional)</h2>
+    <p class="muted">
+      Only needed for the <em>Zigbee lights</em> target. Enter your Home Assistant URL and a
+      long-lived access token of an administrator (your profile → Security).
+    </p>
+    <div class="card">
+      <div class="row">
+        <input id="ha-url" type="url" placeholder="http://homeassistant.local:8123" style="flex:1" />
+        <input id="ha-token" type="password" autocomplete="off" style="flex:1" />
+        <button class="primary" id="ha-save" onclick="saveHomeAssistant()">Save</button>
+      </div>
+      <span class="muted" id="ha-status"></span>
+    </div>
+  </section>
 </main>
 
 <script>
+// Mirrors MAX_ZIGBEE_LIGHTS on the server, which also enforces it.
+const MAX_ZIGBEE_LIGHTS = 10;
+// The ZHA lamps and Home Assistant connection, loaded on page load and after saving the
+// connection - not on the TV poll, as listing the lamps queries Home Assistant.
+let zigbee = { available: false, reason: "", lights: [] };
+let homeAssistant = { addon: false, available: false, url: "", token_set: false };
+
+function esc(value) {
+  const div = document.createElement("div");
+  div.textContent = value ?? "";
+  return div.innerHTML.replaceAll('"', "&quot;");
+}
+
 async function api(path, opts) {
   const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
@@ -161,6 +193,74 @@ async function discover() {
   }
 }
 
+async function loadZigbee() {
+  try { zigbee = await api("cfg/zigbee/lights"); }
+  catch (e) { zigbee = { available: false, reason: String(e.message || e), lights: [] }; }
+}
+
+async function loadHomeAssistant() {
+  homeAssistant = await api("cfg/homeassistant");
+  document.getElementById("ha-section").hidden = homeAssistant.addon;
+  document.getElementById("ha-url").value = homeAssistant.url;
+  document.getElementById("ha-token").placeholder = homeAssistant.token_set
+    ? "token saved — leave empty to keep"
+    : "long-lived access token";
+}
+
+function renderHaStatus() {
+  const status = document.getElementById("ha-status");
+  status.className = zigbee.available || !homeAssistant.available ? "muted" : "error";
+  status.textContent = zigbee.available
+    ? `Connected — ${zigbee.lights.length} Hue colour lamp(s) found in ZHA.`
+    : zigbee.reason;
+}
+
+async function saveHomeAssistant() {
+  const status = document.getElementById("ha-status");
+  const token = document.getElementById("ha-token");
+  const body = { url: document.getElementById("ha-url").value.trim() };
+  if (token.value.trim()) body.token = token.value.trim();
+  status.className = "muted";
+  status.textContent = "Connecting…";
+  try {
+    await api("cfg/homeassistant", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    token.value = "";
+    await Promise.all([loadHomeAssistant(), loadZigbee()]);
+    renderHaStatus();
+    await loadTvs();
+  } catch (e) {
+    status.className = "error";
+    status.textContent = String(e.message || e);
+  }
+}
+
+function renderZigbeeLamps(tv) {
+  const selected = tv.zigbee_lights.map((lamp) => lamp.ieee);
+  const known = new Set(zigbee.lights.map((lamp) => lamp.ieee));
+  // Selected lamps that ZHA no longer lists stay visible so they can be unticked.
+  const lamps = zigbee.lights.concat(
+    tv.zigbee_lights.filter((lamp) => !known.has(lamp.ieee))
+      .map((lamp) => ({ ieee: lamp.ieee, name: lamp.name || lamp.ieee, area: "", missing: true })),
+  );
+  const full = selected.length >= MAX_ZIGBEE_LIGHTS;
+  const items = lamps.map((lamp) => {
+    const checked = selected.includes(lamp.ieee);
+    return `<label class="badge"><input type="checkbox" data-lamp="${esc(lamp.ieee)}"`
+      + `${checked ? " checked" : ""}${!checked && full ? " disabled" : ""}/> ${esc(lamp.name)}`
+      + (lamp.area ? ` <span class="muted">${esc(lamp.area)}</span>` : "")
+      + (lamp.missing ? ' <span class="error">not found in ZHA</span>' : "")
+      + `</label>`;
+  }).join("");
+  const reason = zigbee.available ? "" : `<span class="error">${esc(zigbee.reason)}</span>`;
+  return `<div class="row" style="margin-top:.6rem"><span class="muted">Lamps `
+    + `(up to ${MAX_ZIGBEE_LIGHTS})</span>${items || (zigbee.available ? '<span class="muted">'
+    + "No Hue colour lamps found in ZHA.</span>" : "")}${reason}</div>`;
+}
+
 async function loadTvs() {
   const tvs = await api("cfg/tvs");
   // Areas only fill the per-TV dropdown; if the bridge is unreachable (e.g. unplugged during
@@ -190,9 +290,22 @@ function renderTv(tv, areas) {
       `<option value="${a.id}"${a.id === tv.entertainment_area ? " selected" : ""}>`
       + `${a.name} (${a.channels} lights)</option>`),
   ).join("");
+  const isZigbee = tv.target === "zigbee";
+  const targetRow = zigbee.available || isZigbee
+    ? `<div class="row" style="margin-top:.6rem"><span class="muted">Streams to</span>`
+      + `<select data-target><option value="hue">Hue bridge area</option>`
+      + `<option value="zigbee"${isZigbee ? " selected" : ""}>Zigbee lights (ZHA)</option>`
+      + `</select></div>`
+    : "";
+  const areaRow = `<div class="row" style="margin-top:.6rem"><span class="muted">Controls area</span>`
+    + `<select data-area>${opts}</select>`
+    + `<label class="badge"><input type="checkbox" data-split${tv.split_gradients ? " checked" : ""}/>`
+    + ` split gradient zones</label></div>`;
   const lights = (tv.lights && tv.lights.length)
-    ? tv.lights.join(", ")
-    : "— none yet; pick an area above to give this TV its lights";
+    ? esc(tv.lights.join(", "))
+    : isZigbee
+      ? "— none yet; tick the lamps above to give this TV its lights"
+      : "— none yet; pick an area above to give this TV its lights";
   const smooth = Number(tv.stream_smoothing ?? 0);
   card.innerHTML =
     `<div class="row"><strong>${tv.devicetype || "TV"}</strong>`
@@ -205,10 +318,8 @@ function renderTv(tv, areas) {
     + `value="${Number(tv.stream_priority ?? 0)}" style="width:4.5rem"/>`
     + `<span class="muted" style="font-size:.85rem">Higher wins; the current TV wins a tie.</span>`
     + `</div>`
-    + `<div class="row" style="margin-top:.6rem"><span class="muted">Controls area</span>`
-    + `<select data-area>${opts}</select>`
-    + `<label class="badge"><input type="checkbox" data-split${tv.split_gradients ? " checked" : ""}/>`
-    + ` split gradient zones</label></div>`
+    + targetRow
+    + (isZigbee ? renderZigbeeLamps(tv) : areaRow)
     + `<div class="row" style="margin-top:.3rem"><span class="muted">Smoothness</span>`
     + `<input data-smooth type="range" min="0" max="0.95" step="0.05" value="${smooth}" style="flex:1"/>`
     + `<span class="badge" data-smooth-val>${smooth.toFixed(2)}</span></div>`
@@ -236,8 +347,35 @@ function renderTv(tv, areas) {
       await loadTvs();
     } catch (e) { err.textContent = String(e.message || e); }
   };
-  sel.onchange = save;
-  split.onchange = save;
+  if (sel) sel.onchange = save;
+  if (split) split.onchange = save;
+  const target = card.querySelector("[data-target]");
+  if (target) {
+    target.onchange = async () => {
+      err.textContent = "";
+      try {
+        await put({ target: target.value });
+        await loadTvs();
+      } catch (e) { err.textContent = String(e.message || e); }
+    };
+  }
+  for (const box of card.querySelectorAll("[data-lamp]")) {
+    box.onchange = async () => {
+      const ticked = new Set(
+        [...card.querySelectorAll("[data-lamp]:checked")].map((b) => b.dataset.lamp),
+      );
+      const names = new Map(zigbee.lights.map((lamp) => [lamp.ieee, lamp.name]));
+      // Keep the current order so the TV's existing lights keep their ids; append new picks.
+      const kept = tv.zigbee_lights.filter((lamp) => ticked.has(lamp.ieee));
+      const added = [...ticked].filter((ieee) => !kept.some((lamp) => lamp.ieee === ieee))
+        .map((ieee) => ({ ieee, name: names.get(ieee) || "" }));
+      err.textContent = "";
+      try {
+        await put({ target: "zigbee", zigbee_lights: kept.concat(added) });
+        await loadTvs();
+      } catch (e) { err.textContent = String(e.message || e); }
+    };
+  }
   const savePolicy = async () => {
     err.textContent = "";
     try {
@@ -266,7 +404,10 @@ function renderTv(tv, areas) {
 }
 
 async function refresh() {
-  const [, bridges] = await Promise.all([loadStatus(), loadBridges()]);
+  const [, bridges] = await Promise.all([
+    loadStatus(), loadBridges(), loadHomeAssistant(), loadZigbee(),
+  ]);
+  renderHaStatus();
   await loadTvs();
   // First-run convenience: scan for bridges automatically when none are configured yet.
   if (!bridges.length) discover();

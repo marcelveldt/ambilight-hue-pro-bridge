@@ -130,6 +130,9 @@ async def log_requests(request: web.Request, handler: Handler) -> web.StreamResp
         with suppress(Exception):
             body = await request.text()
     level = VERBOSE if request.path == "/" or request.path.startswith("/cfg") else logging.DEBUG
+    if request.path == "/cfg/homeassistant":
+        # Carries the Home Assistant access token.
+        body = "<redacted>" if body else ""
     suffix = f"  body={body}" if body else ""
     try:
         response = await handler(request)

@@ -21,6 +21,7 @@ from .emulator.pairing import PairingManager
 from .emulator.rest_v1 import HueV1Emulator, log_requests
 from .engine.engine import Engine
 from .identity import bridge_id, bridge_udn, get_host_mac
+from .outbound.homeassistant import HomeAssistantClient
 from .web.server import WebServer
 
 if TYPE_CHECKING:
@@ -140,7 +141,8 @@ class BridgeApp:
         mac = resolve_mac(self._store)
         host_ip = get_host_ip()
 
-        engine = Engine(self._store)
+        home_assistant = HomeAssistantClient(self._store)
+        engine = Engine(self._store, home_assistant=home_assistant)
         self._engine = engine
         pairing = PairingManager(self._store)
         emulator = HueV1Emulator(
@@ -158,6 +160,7 @@ class BridgeApp:
             mac=mac,
             host_ip=host_ip,
             http_port=http_port,
+            home_assistant=home_assistant,
         )
 
         # One app serves the TV-facing Hue v1 API/descriptor and the web UI on http_port (older

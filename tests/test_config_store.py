@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ambilight_hue_bridge.config.models import PairedUser, VirtualLight
+from ambilight_hue_bridge.config.models import (
+    PairedUser,
+    StreamTarget,
+    VirtualLight,
+    ZigbeeLightRef,
+)
 from ambilight_hue_bridge.config.store import ConfigStore
 
 if TYPE_CHECKING:
@@ -68,3 +73,53 @@ users:
     config = ConfigStore(path).load()
     assert config.users[0].enabled is True
     assert config.users[0].stream_priority == 0
+
+
+def test_zigbee_target_roundtrip(tmp_path: Path) -> None:
+    """A TV's Zigbee target and lamps and the Home Assistant connection round-trip."""
+    path = tmp_path / "config.yaml"
+    store = ConfigStore(path)
+    store.load()
+    store.config.users.append(
+        PairedUser(
+            username="u1",
+            clientkey="k",
+            devicetype="TV",
+            created="2026-11-10",
+            target=StreamTarget.ZIGBEE,
+            zigbee_lights=[ZigbeeLightRef(ieee="00:17:88:01:00:00:00:01", name="Couch")],
+        ),
+    )
+    store.config.home_assistant.url = "http://homeassistant.local:8123"
+    store.config.home_assistant.token = "token"
+    store.save()
+    assert "target: zigbee" in path.read_text(encoding="utf-8")
+
+    config = ConfigStore(path).load()
+    assert config.users[0].target is StreamTarget.ZIGBEE
+    assert config.users[0].zigbee_lights == [
+        ZigbeeLightRef(ieee="00:17:88:01:00:00:00:01", name="Couch")
+    ]
+    assert config.home_assistant.url == "http://homeassistant.local:8123"
+    assert config.home_assistant.token == "token"
+
+
+def test_load_old_config_defaults_to_the_hue_target(tmp_path: Path) -> None:
+    """Configs from before the Zigbee target keep TVs on the Hue bridge, with no HA connection."""
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+users:
+  - username: u1
+    clientkey: k
+    devicetype: TV
+    created: "2026-06-10"
+    entertainment_area: area-1
+""".lstrip(),
+        encoding="utf-8",
+    )
+    config = ConfigStore(path).load()
+    assert config.users[0].target is StreamTarget.HUE
+    assert config.users[0].zigbee_lights == []
+    assert config.home_assistant.url == ""
+    assert config.home_assistant.token == ""

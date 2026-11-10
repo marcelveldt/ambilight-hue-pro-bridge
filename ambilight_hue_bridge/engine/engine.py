@@ -8,15 +8,17 @@ import time
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
+from ambilight_hue_bridge.config.models import StreamTarget
 from ambilight_hue_bridge.const import MAX_STREAM_SMOOTHING
-from ambilight_hue_bridge.outbound.backend import BackendHealth, HueBridgeBackend
+from ambilight_hue_bridge.outbound.backend import BackendHealth, HueBridgeBackend, ZigbeeBackend
 from ambilight_hue_bridge.outbound.controller import active_bridge, paired_user, tv_stream_target
+from ambilight_hue_bridge.outbound.homeassistant import HomeAssistantClient
 
 from .ingest import ColorBuffer
 from .mapping import map_to_commands
 
 if TYPE_CHECKING:
-    from ambilight_hue_bridge.config.models import RealBridge, VirtualLight
+    from ambilight_hue_bridge.config.models import PairedUser, VirtualLight
     from ambilight_hue_bridge.config.store import ConfigStore
     from ambilight_hue_bridge.outbound.backend import OutputBackend
 
@@ -32,6 +34,8 @@ _HEALTH_FAILS_TO_RECOVER = 2
 # After another controller takes the area over, wait this long before re-grabbing it, so we don't
 # fight a deliberate Hue-app / Sync-box stream on every frame.
 _FOREIGN_BACKOFF_S = 60.0
+# After a failed start, wait this long before the next attempt instead of retrying on every frame.
+_START_RETRY_BACKOFF_S = 3.0
 # Identify ("blink this light", from the TV's Hue alert during setup): flash full white on/off
 # over the stream for a short window ("select") or a longer one ("lselect").
 _IDENTIFY_SELECT_S = 2.0
@@ -43,14 +47,24 @@ _IDENTIFY_RGB = (65535, 65535, 65535)
 class Engine:
     """Owns the ingest buffer and the on-demand outbound entertainment stream."""
 
-    def __init__(self, store: ConfigStore, *, rate_hz: int | None = None) -> None:
+    def __init__(
+        self,
+        store: ConfigStore,
+        *,
+        rate_hz: int | None = None,
+        home_assistant: HomeAssistantClient | None = None,
+    ) -> None:
         """
         Initialize the engine (no stream until the first color is submitted).
 
         :param store: Config store providing the real bridges and virtual lights.
         :param rate_hz: Outbound frame rate in Hz (defaults to the configured rate).
+        :param home_assistant: Client for the Zigbee target (defaults to one on ``store``).
         """
         self._store = store
+        self._home_assistant = (
+            home_assistant if home_assistant is not None else HomeAssistantClient(store)
+        )
         rate = rate_hz if rate_hz is not None else store.config.virtual_bridge.stream_rate_hz
         self._interval = 1.0 / max(1, rate)
         self._buffer = ColorBuffer()
@@ -60,6 +74,10 @@ class Engine:
         self._smoothed_float: dict[str, tuple[float, float, float]] = {}
         self._smoothed_buffer = ColorBuffer()
         self._backend: OutputBackend | None = None
+        # A torn-down backend's close (for Zigbee: restoring the lamps) still in progress.
+        self._closing: asyncio.Task[None] | None = None
+        # True while restart_stream() replaces the transition; concurrent restarts coalesce.
+        self._restarting = False
         self._ticker: asyncio.Task[None] | None = None
         self._health_task: asyncio.Task[None] | None = None
         self._transition_task: asyncio.Task[None] | None = None
@@ -68,7 +86,7 @@ class Engine:
         self._request_order: dict[str, int] = {}
         self._next_request_order = 0
         # Monotonic time before which a new stream won't be opened (set when another controller
-        # took the area over, so we back off rather than fight it).
+        # took the area over, so we back off rather than fight it, or after a failed start).
         self._regrab_block_until = 0.0
         # Set by the health monitor when the bridge has ended our stream; the ticker watches it
         # and tears down (keeping teardown a single-owner path).
@@ -133,19 +151,29 @@ class Engine:
             and time.monotonic() >= self._regrab_block_until
         ):
             self._logged_no_stream = True
-            bridge = active_bridge(self._store)
             user = paired_user(self._store, owner)
-            area, lights = tv_stream_target(self._store, owner)
-            LOGGER.warning(
-                "Not starting outbound stream: owner=%s enabled=%s bridge=%s client_key=%s "
-                "area=%r lights=%d",
-                owner,
-                user.enabled if user is not None else None,
-                bridge.id if bridge else None,
-                bool(bridge and bridge.client_key),
-                area,
-                len(lights),
-            )
+            if user is not None and user.target is StreamTarget.ZIGBEE:
+                LOGGER.warning(
+                    "Not starting outbound stream: owner=%s enabled=%s target=zigbee "
+                    "home_assistant=%s zigbee_lights=%d",
+                    owner,
+                    user.enabled,
+                    self._home_assistant.available,
+                    len(user.zigbee_lights),
+                )
+            else:
+                bridge = active_bridge(self._store)
+                area, lights = tv_stream_target(self._store, owner)
+                LOGGER.warning(
+                    "Not starting outbound stream: owner=%s enabled=%s bridge=%s client_key=%s "
+                    "area=%r lights=%d",
+                    owner,
+                    user.enabled if user is not None else None,
+                    bridge.id if bridge else None,
+                    bool(bridge and bridge.client_key),
+                    area,
+                    len(lights),
+                )
 
     def start_stream(self, owner: str) -> bool:
         """
@@ -220,6 +248,20 @@ class Engine:
         await self._teardown()
         self._schedule_reconcile()
 
+    async def restart_stream(self, owner: str) -> None:
+        """Restart a TV's active stream so changed stream settings (target, lights) apply now."""
+        if self._stream_owner != owner or self._restarting:
+            return
+        self._restarting = True
+        try:
+            self._stream_gen += 1
+            await self._cancel_transition()
+            # The teardown runs as the ownership transition, so frames arriving while the old
+            # backend closes (restoring Zigbee lamps) can't start a replacement alongside it.
+            self._transition_task = asyncio.create_task(self._restart())
+        finally:
+            self._restarting = False
+
     def identify(self, owner: str, light_id: str, *, sustained: bool = False) -> None:
         """
         Blink a light so the user can locate it (the TV's 'alert' during light assignment).
@@ -266,6 +308,8 @@ class Engine:
         user = paired_user(self._store, owner)
         if user is None or not user.enabled:
             return False
+        if user.target is StreamTarget.ZIGBEE:
+            return bool(user.zigbee_lights) and self._home_assistant.available
         bridge = active_bridge(self._store)
         if bridge is None or not bridge.client_key:
             return False
@@ -339,6 +383,12 @@ class Engine:
                     self._stream_gen += 1
                     await self._teardown()
                     continue
+                if current is not None and self._backend is not None and not self.is_streaming:
+                    # The stream died before its ticker noticed: tear it down here first, so
+                    # the restart below never races the ticker's own teardown.
+                    self._stream_gen += 1
+                    await self._teardown()
+                    continue
                 if self.is_streaming:
                     return
                 if time.monotonic() < self._regrab_block_until:
@@ -354,6 +404,15 @@ class Engine:
                 return
         finally:
             self._transition_task = None
+
+    async def _restart(self) -> None:
+        """Tear the active stream down, then reconcile; runs as the transition task."""
+        try:
+            await self._teardown()
+        except BaseException:
+            self._transition_task = None
+            raise
+        await self._reconcile()
 
     def _apply_smoothing(self, lights: list[VirtualLight]) -> None:
         """
@@ -404,38 +463,52 @@ class Engine:
         for light_id in identified:
             self._smoothed_buffer.set_color(light_id, rgb)
 
-    def _create_backend(self, bridge: RealBridge, area: str) -> OutputBackend:
-        """Return the output backend for a TV's stream target."""
-        return HueBridgeBackend(bridge, area)
+    def _create_backend(self, user: PairedUser) -> tuple[OutputBackend, str] | None:
+        """
+        Return the output backend for a TV's stream target, with a target label for logs.
+
+        None when a Hue-target TV has no real bridge to stream to.
+        """
+        if user.target is StreamTarget.ZIGBEE:
+            lamps = user.zigbee_lights
+            return ZigbeeBackend(self._home_assistant, lamps), f"{len(lamps)} Zigbee lamp(s)"
+        bridge = active_bridge(self._store)
+        if bridge is None:
+            return None
+        area = user.entertainment_area
+        return HueBridgeBackend(bridge, area), f"{bridge.host} area {area}"
 
     async def _open_stream(self, owner: str) -> bool:
         """Open the output stream for one TV and start its ticker."""
-        bridge = active_bridge(self._store)
-        if bridge is None:
+        gen = self._stream_gen
+        # Never overlap a previous backend that is still closing (restoring its lamps).
+        with suppress(Exception):
+            await self._wait_for_close()
+        user = paired_user(self._store, owner)
+        # The TV may have been disabled or preempted while we waited (that bumps the gen).
+        created = (
+            self._create_backend(user) if user is not None and gen == self._stream_gen else None
+        )
+        if user is None or created is None:
             if self._stream_owner == owner:
                 self._stream_owner = None
             return False
-        # The owner's assigned area + lights ("", [] when the TV is unassigned).
-        gen = self._stream_gen
-        area, lights = tv_stream_target(self._store, owner)
-        backend = self._create_backend(bridge, area)
+        backend, target = created
+        lights = user.lights
         try:
-            LOGGER.info(
-                "Starting outbound stream to %s area %s (owner=%s)",
-                bridge.host,
-                area,
-                owner,
-            )
+            LOGGER.info("Starting outbound stream to %s (owner=%s)", target, owner)
             await backend.start()
         except asyncio.CancelledError:
             # stop() cancelled us mid-connect. If the cancel landed after backend.start() had
             # already activated the area on the bridge (its pre-DTLS HTTP PUT), the backend is
             # orphaned here - close it so the area is deactivated and the HTTP session released.
+            self._closing = asyncio.create_task(backend.aclose())
             with suppress(Exception):
-                await backend.aclose()
+                await self._wait_for_close()
             raise
         except Exception:
-            LOGGER.exception("Failed to start outbound stream to %s area %s", bridge.host, area)
+            LOGGER.exception("Failed to start outbound stream to %s", target)
+            self._regrab_block_until = time.monotonic() + _START_RETRY_BACKOFF_S
             with suppress(Exception):
                 await backend.aclose()
             if self._stream_owner == owner:
@@ -444,9 +517,7 @@ class Engine:
         else:
             if gen != self._stream_gen:
                 LOGGER.info(
-                    "Discarding outbound stream to %s area %s: ownership changed mid-connect",
-                    bridge.host,
-                    area,
+                    "Discarding outbound stream to %s: ownership changed mid-connect", target
                 )
                 await backend.aclose()
                 if self._stream_owner == owner:
@@ -457,7 +528,7 @@ class Engine:
             self._remote_dead = False
             self._ticker = asyncio.create_task(self._run_ticker(owner))
             self._health_task = asyncio.create_task(self._run_health(owner, backend))
-            LOGGER.info("Outbound stream started to %s area %s", bridge.host, area)
+            LOGGER.info("Outbound stream started to %s", target)
             return True
 
     async def _run_ticker(self, owner: str) -> None:
@@ -493,6 +564,9 @@ class Engine:
                 await asyncio.sleep(self._interval)
         finally:
             if self._stream_owner == owner:
+                # A start already in flight for this owner must discard itself, not adopt the
+                # slot this teardown is clearing.
+                self._stream_gen += 1
                 await self._teardown()
                 LOGGER.info("Outbound stream stopped")
 
@@ -566,4 +640,18 @@ class Engine:
         self._logged_empty = False
         self._logged_no_stream = False
         if backend is not None:
-            await backend.aclose()
+            # Closing restores Zigbee lamps: it runs on even when this teardown is cancelled, and
+            # the next stream (or shutdown) waits for it.
+            self._closing = asyncio.create_task(backend.aclose())
+        await self._wait_for_close()
+
+    async def _wait_for_close(self) -> None:
+        """Wait for a backend close still in progress; it keeps running if we are cancelled."""
+        closing = self._closing
+        if closing is None:
+            return
+        try:
+            await asyncio.shield(closing)
+        finally:
+            if closing.done() and self._closing is closing:
+                self._closing = None

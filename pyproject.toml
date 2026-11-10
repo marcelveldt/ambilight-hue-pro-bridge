@@ -17,9 +17,9 @@ dependencies = [
   "pyyaml>=6.0",
   # Outbound Hue Entertainment streaming client (DTLS/PSK + HueStream), shared with
   # Music Assistant. During local development it is installed editable from the sibling
-  # checkout (see scripts/setup.sh); CI/users get it from PyPI. >=0.1.2 for remote_status(),
-  # which the engine's outbound-stream health monitor needs (older versions disable it).
-  "hue-entertainment>=0.1.2",
+  # checkout (see scripts/setup.sh); CI/users get it from PyPI. >=0.2.0 for the Zigbee
+  # entertainment session behind the Zigbee lights target.
+  "hue-entertainment>=0.2.0",
   # Hue-style self-signed TLS cert for the HTTPS listener (newer TVs connect over TLS).
   "cryptography>=42",
   # mDNS/DNS-SD advertisement of _hue._tcp so newer Hue clients can also discover us.
@@ -146,8 +146,9 @@ ignore = [
 select = ["ALL"]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests poke at private members, use magic values, and use loosely-typed fixtures.
-"tests/*" = ["SLF001", "PLR2004", "ANN001"]
+# Tests poke at private members, use magic values and fake credentials, and use loosely-typed
+# fixtures.
+"tests/*" = ["SLF001", "PLR2004", "ANN001", "S105", "S106"]
 # The CLI prints command output to stdout.
 "ambilight_hue_bridge/__main__.py" = ["T201"]
 

@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 from mashumaro.mixins.yaml import DataClassYAMLMixin
 
 from ambilight_hue_bridge.const import DEFAULT_STREAM_RATE_HZ, STREAMING_LIGHT_MODEL_ID
+
+
+class StreamTarget(StrEnum):
+    """Where a TV's colors are streamed to."""
+
+    # An entertainment area on the real Hue bridge.
+    HUE = "hue"
+    # Zigbee lamps from Home Assistant's ZHA, streamed directly without a Hue bridge.
+    ZIGBEE = "zigbee"
 
 
 @dataclass
@@ -23,6 +33,14 @@ class VirtualLight:
 
 
 @dataclass
+class ZigbeeLightRef:
+    """A Zigbee lamp a TV streams to, identified by its IEEE address."""
+
+    ieee: str
+    name: str = ""
+
+
+@dataclass
 class PairedUser:
     """A username created by a client (TV) through the pushlink pairing flow."""
 
@@ -34,12 +52,17 @@ class PairedUser:
     enabled: bool = True
     # Higher values win when multiple TVs request the bridge's single streaming slot.
     stream_priority: int = 0
+    # Where this TV's colors go: a Hue bridge entertainment area or Zigbee lamps from ZHA.
+    target: StreamTarget = StreamTarget.HUE
     # Per-TV assignment: the source-bridge entertainment area this TV drives, whether to split
     # gradient lights into per-zone virtual lights, and the resulting lights exposed to this TV.
     # Unassigned (empty area) => the TV sees no lights and does not stream until assigned.
     entertainment_area: str = ""
     split_gradients: bool = True
     lights: list[VirtualLight] = field(default_factory=list)
+    # The ZHA lamps a Zigbee-target TV streams to; the TV sees one light per lamp. Stored by IEEE
+    # address only, as the network address can change.
+    zigbee_lights: list[ZigbeeLightRef] = field(default_factory=list)
     # Per-TV temporal easing (None/0 => off). Fast DTLS-streaming TVs are already smooth and want
     # 0; the ~1 Hz REST TVs (older models) want easing to fill the gaps between updates.
     stream_smoothing: float | None = None
@@ -96,6 +119,16 @@ class RealBridge:
 
 
 @dataclass
+class HomeAssistantSettings:
+    """The Home Assistant connection used when not running as a Home Assistant add-on."""
+
+    # Base URL, e.g. http://homeassistant.local:8123.
+    url: str = ""
+    # Long-lived access token of an administrator (ZHA's network settings require one).
+    token: str = ""
+
+
+@dataclass
 class Config(DataClassYAMLMixin):
     """Top-level persisted configuration."""
 
@@ -104,3 +137,4 @@ class Config(DataClassYAMLMixin):
     real_bridges: list[RealBridge] = field(default_factory=list)
     # id of the real bridge currently streamed to (empty => first configured bridge).
     active_real_bridge: str = ""
+    home_assistant: HomeAssistantSettings = field(default_factory=HomeAssistantSettings)

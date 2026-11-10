@@ -13,10 +13,12 @@ from ambilight_hue_bridge.config.models import (
     CachedChannel,
     PairedUser,
     RealBridge,
+    StreamTarget,
     VirtualLight,
 )
 from ambilight_hue_bridge.config.store import ConfigStore
 from ambilight_hue_bridge.outbound.controller import lights_from_area
+from ambilight_hue_bridge.outbound.homeassistant import HomeAssistantError, ZhaLight
 from ambilight_hue_bridge.web.server import WebServer
 
 if TYPE_CHECKING:
@@ -30,9 +32,13 @@ class _FakePolicyEngine:
         self.stream_owner: str | None = None
         self.is_streaming = False
         self.changed: list[str] = []
+        self.restarted: list[str] = []
 
     def tv_settings_changed(self, owner: str) -> None:
         self.changed.append(owner)
+
+    async def restart_stream(self, owner: str) -> None:
+        self.restarted.append(owner)
 
     async def remove_tv(self, _owner: str) -> None:
         return
@@ -432,3 +438,183 @@ def _fake_areas_factory() -> object:
         ]
 
     return fake_areas
+
+
+class _FakeHomeAssistant:
+    """Stand-in for HomeAssistantClient with a fixed Ziggurat URL and ZHA lamps, or an error."""
+
+    def __init__(
+        self,
+        url: str | None = "ws://core-ziggurat:9999",
+        error: HomeAssistantError | None = None,
+    ) -> None:
+        self.url = url
+        self.error = error
+        self.is_addon = False
+        self.available = error is None
+
+    async def ziggurat_url(self) -> str | None:
+        if self.error is not None:
+            raise self.error
+        return self.url
+
+    async def hue_lights(self) -> list[ZhaLight]:
+        return [
+            ZhaLight(
+                ieee="00:17:88:01:00:00:00:01", nwk=1, name="Couch", area="Living", model="LCT015"
+            ),
+        ]
+
+
+def _zigbee_app(
+    store: ConfigStore, home_assistant: _FakeHomeAssistant, engine: object = None
+) -> web.Application:
+    server = WebServer(
+        store=store,
+        engine=engine,  # type: ignore[arg-type]
+        mac="aabbccddeeff",
+        host_ip="1.2.3.4",
+        http_port=8080,
+        home_assistant=home_assistant,  # type: ignore[arg-type]
+    )
+    app = web.Application()
+    server.register(app)
+    return app
+
+
+async def test_zigbee_lights_lists_hue_lamps(aiohttp_client, web_setup) -> None:
+    """The Zigbee lights endpoint lists ZHA's Hue color lamps (name, area) when available."""
+    _app, store = web_setup
+    client = await aiohttp_client(_zigbee_app(store, _FakeHomeAssistant()))
+    data = await (await client.get("/cfg/zigbee/lights")).json()
+    assert data == {
+        "available": True,
+        "lights": [
+            {
+                "ieee": "00:17:88:01:00:00:00:01",
+                "name": "Couch",
+                "area": "Living",
+                "model": "LCT015",
+            },
+        ],
+    }
+
+
+async def test_zigbee_lights_unavailable_without_ziggurat(aiohttp_client, web_setup) -> None:
+    """ZHA on another radio makes the Zigbee target unavailable, with the reason."""
+    _app, store = web_setup
+    client = await aiohttp_client(_zigbee_app(store, _FakeHomeAssistant(url=None)))
+    data = await (await client.get("/cfg/zigbee/lights")).json()
+    assert data["available"] is False
+    assert "Ziggurat" in data["reason"]
+    assert data["lights"] == []
+
+
+async def test_zigbee_lights_reports_home_assistant_errors(aiohttp_client, web_setup) -> None:
+    """A Home Assistant error becomes the unavailable reason instead of an HTTP error."""
+    _app, store = web_setup
+    error = HomeAssistantError("Home Assistant is not connected; set its URL and access token")
+    client = await aiohttp_client(_zigbee_app(store, _FakeHomeAssistant(error=error)))
+    resp = await client.get("/cfg/zigbee/lights")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["available"] is False
+    assert data["reason"] == str(error)
+
+
+async def test_assign_zigbee_target_rebuilds_lights(aiohttp_client, web_setup, monkeypatch) -> None:
+    """Picking Zigbee lamps gives the TV one light per lamp; switching back rebuilds the area."""
+    _app, store = web_setup
+    _cached_bridge(store)
+    store.config.users = [
+        PairedUser(
+            username="u1",
+            clientkey="k",
+            devicetype="TV",
+            created="2026-11-10",
+            entertainment_area="area-1",
+            lights=[VirtualLight(id="1", name="c0", channels=[0])],
+        ),
+    ]
+
+    async def boom(_host: str, _app_key: str) -> object:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("ambilight_hue_bridge.web.server.list_areas", boom)
+    engine = _FakePolicyEngine()
+    client = await aiohttp_client(_zigbee_app(store, _FakeHomeAssistant(), engine))
+    lamps = [
+        {"ieee": "00:17:88:01:00:00:00:0A", "name": "A lamp with a name far beyond 32 chars"},
+        {"ieee": "00:17:88:01:00:00:00:0b", "name": "Couch"},
+    ]
+    tv = await (
+        await client.put("/cfg/tvs/u1", json={"target": "zigbee", "zigbee_lights": lamps})
+    ).json()
+    assert tv["target"] == "zigbee"
+    assert tv["zigbee_lights"] == [
+        {"ieee": "00:17:88:01:00:00:00:0a", "name": lamps[0]["name"]},
+        {"ieee": "00:17:88:01:00:00:00:0b", "name": "Couch"},
+    ]
+    assert tv["lights"] == ["A lamp with a name far beyond 32", "Couch"]
+    user = store.config.users[0]
+    assert user.target is StreamTarget.ZIGBEE
+    assert [(light.id, light.channels) for light in user.lights] == [("1", [0]), ("2", [1])]
+    assert engine.changed == ["u1"]
+    assert engine.restarted == ["u1"]
+
+    tv = await (await client.put("/cfg/tvs/u1", json={"target": "hue"})).json()
+    assert tv["target"] == "hue"
+    assert tv["lights"] == ["c0", "c1"]
+    # The lamp selection is kept for switching back.
+    assert len(tv["zigbee_lights"]) == 2
+
+
+async def test_assign_zigbee_rejects_invalid_values(aiohttp_client, web_setup) -> None:
+    """An unknown target, too many lamps, or a lamp without an IEEE address is rejected."""
+    app, store = web_setup
+    store.config.users = [
+        PairedUser(username="u1", clientkey="k", devicetype="TV", created="2026-11-10"),
+    ]
+    client = await aiohttp_client(app)
+    too_many = [{"ieee": f"00:17:88:01:00:00:00:{index:02x}"} for index in range(11)]
+    assert (await client.put("/cfg/tvs/u1", json={"target": "wled"})).status == 400
+    assert (await client.put("/cfg/tvs/u1", json={"zigbee_lights": too_many})).status == 400
+    assert (await client.put("/cfg/tvs/u1", json={"zigbee_lights": [{"name": "x"}]})).status == 400
+    assert (await client.put("/cfg/tvs/u1", json={"zigbee_lights": "lamp"})).status == 400
+    user = store.config.users[0]
+    assert user.target is StreamTarget.HUE
+    assert user.zigbee_lights == []
+
+
+async def test_home_assistant_token_is_write_only(aiohttp_client, web_setup, monkeypatch) -> None:
+    """The Home Assistant token can be set and kept, but no response ever contains it."""
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+    app, store = web_setup
+    client = await aiohttp_client(app)
+    resp = await client.put(
+        "/cfg/homeassistant", json={"url": "http://homeassistant.local:8123", "token": "s3cret"}
+    )
+    assert "s3cret" not in await resp.text()
+    resp = await client.get("/cfg/homeassistant")
+    assert "s3cret" not in await resp.text()
+    assert await resp.json() == {
+        "addon": False,
+        "available": True,
+        "url": "http://homeassistant.local:8123",
+        "token_set": True,
+    }
+    assert store.config.home_assistant.token == "s3cret"
+
+    # Re-sending the same URL keeps the token; a different URL drops it (the token is never
+    # sent to a host it was not entered for); an empty URL disconnects.
+    await client.put("/cfg/homeassistant", json={"url": "http://homeassistant.local:8123"})
+    assert store.config.home_assistant.token == "s3cret"
+    await client.put("/cfg/homeassistant", json={"url": "https://ha.example.com"})
+    assert store.config.home_assistant.token == ""
+    await client.put("/cfg/homeassistant", json={"url": "https://ha.example.com", "token": "new"})
+    assert store.config.home_assistant.token == "new"
+    data = await (await client.put("/cfg/homeassistant", json={"url": ""})).json()
+    assert data["available"] is False
+    assert store.config.home_assistant.token == ""
+
+    assert (await client.put("/cfg/homeassistant", json={"url": "ftp://x"})).status == 400

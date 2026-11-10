@@ -87,6 +87,23 @@ plug the real bridge back in**. The TV is auto-assigned your first entertainment
 Once locked, the TV keeps this bridge until *this* one restarts, which can send it drifting back —
 so isolating the bridges above is the real fix, not a one-time step.
 
+## Zigbee lights without a Hue bridge
+
+If Home Assistant's **ZHA** integration runs on a **Ziggurat** radio, a TV can stream straight to
+Hue colour lamps on that Zigbee network, with no Hue bridge involved:
+
+1. In the web UI, set the TV's **Streams to** to **Zigbee lights (ZHA)**. The option appears once
+   Home Assistant is reachable and ZHA runs on Ziggurat.
+2. Tick up to 10 Hue colour lamps, listed by name and area. The TV sees one light per lamp; place
+   them around the screen in the TV's Ambilight+Hue menu.
+
+As a Home Assistant add-on the connection to Home Assistant is automatic. Otherwise enter your Home
+Assistant URL and a long-lived access token of an administrator under **Home Assistant** in the web
+UI.
+
+Each lamp's state is captured when streaming starts and restored when it stops. Every frame goes to
+one lamp that relays it to the others, so pick lamps within radio range of each other.
+
 ## Features
 
 - 🪟 Web interface for configuration
@@ -96,6 +113,7 @@ so isolating the bridges above is the real fix, not a one-time step.
 - 🌈 Map a gradient / multi-zone light into multiple addressable virtual lights
 - 📡 Discovered by both older (SSDP/UPnP) and newer (mDNS) Ambilight TVs
 - 🔌 Works with both the square Hue V2 bridge and the new Hue Pro bridge
+- 💡 No Hue bridge needed for Zigbee lamps in Home Assistant's ZHA (on a Ziggurat radio)
 - ⚡ Low-latency streaming — inbound DTLS from newer TVs, ~1 Hz REST from older ones, forwarded over the Entertainment API
 
 ## Architecture
@@ -111,7 +129,8 @@ The service is built from a few focused, decoupled components:
   over DTLS/PSK, via the shared
   [music-assistant/hue-entertainment](https://github.com/music-assistant/hue-entertainment)
   library (pure-Python DTLS 1.2 PSK + `HueStream` encoder, *"working and tested on Hue
-  Bridge V2 and Hue Bridge Pro"*).
+  Bridge V2 and Hue Bridge Pro"*). For the Zigbee lights target the same library streams
+  straight onto ZHA's Ziggurat server instead.
 - **Web UI + config store** — pair the real bridge, then assign each paired TV an
   entertainment area (optionally splitting its gradient strips into per-zone virtual
   lights). New TVs default to your first area; until a bridge is paired a TV has no lights
@@ -234,7 +253,8 @@ Implemented and working end-to-end:
   N-UPnP endpoint for other LAN clients.
 - **Streaming** — inbound DTLS server (UDP 2100) for newer TVs and the ~1 Hz REST path for older
   ones, forwarded on demand to a V2 or Pro bridge over the Entertainment API via the shared
-  [music-assistant/hue-entertainment](https://github.com/music-assistant/hue-entertainment) client.
+  [music-assistant/hue-entertainment](https://github.com/music-assistant/hue-entertainment) client,
+  or straight to Zigbee lamps in Home Assistant's ZHA (Ziggurat).
 - **Engine** — per-TV light/area mapping, gradient-zone split, per-TV temporal smoothing, priority
   arbitration/preemption, enablement, light identify (blink), and idle teardown.
 - **Web UI** — bridge pairing, per-TV area assignment, smoothing, enablement/priority, and removal.

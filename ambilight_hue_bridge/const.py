@@ -60,6 +60,8 @@ UPNP_SERVER: Final = "Linux/3.14.0 UPnP/1.0 IpBridge/1.67.0"
 # frozen output). The frame rate is a config-only field (no UI), defaulting to 50 Hz.
 DEFAULT_STREAM_RATE_HZ: Final = 50
 MAX_STREAM_SMOOTHING: Final = 0.95
+# A Zigbee entertainment frame carries at most this many lights.
+MAX_ZIGBEE_LIGHTS: Final = 10
 
 # devicetype registered with the real bridge when pairing; shown in the Hue app's list of
 # connected apps (format "appname#devicename").
