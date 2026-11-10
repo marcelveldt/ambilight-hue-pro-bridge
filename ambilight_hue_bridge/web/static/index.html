@@ -266,12 +266,20 @@ function renderZigbeeLamps(tv) {
     + `${tv.split_gradients ? " checked" : ""}/> split gradient zones</label></div>`;
 }
 
+// TV edits in flight, and a count of all edits made, so a redraw never shows older state.
+let tvEdits = 0;
+let tvEditSeq = 0;
+
 async function loadTvs() {
+  const seq = tvEditSeq;
   const tvs = await api("cfg/tvs");
   // Areas only fill the per-TV dropdown; if the bridge is unreachable (e.g. unplugged during
   // TV pairing) that must not hide the TV list itself.
   let areas = [];
   try { areas = await api("cfg/areas"); } catch (e) { /* show TVs without area options */ }
+  // Redrawing while an edit is pending (or from state read before it) would reset its
+  // checkboxes, and the next tick would then send that stale selection.
+  if (tvEdits || seq !== tvEditSeq) return;
   const container = document.getElementById("tvs");
   container.innerHTML = "";
   if (!tvs.length) {
@@ -340,11 +348,19 @@ function renderTv(tv, areas) {
   const smoothEl = card.querySelector("[data-smooth]");
   const smoothVal = card.querySelector("[data-smooth-val]");
   const err = card.querySelector("[data-err]");
-  const put = (body) => api(`cfg/tvs/${encodeURIComponent(tv.username)}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const put = async (body) => {
+    tvEdits += 1;
+    tvEditSeq += 1;
+    try {
+      return await api(`cfg/tvs/${encodeURIComponent(tv.username)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } finally {
+      tvEdits -= 1;
+    }
+  };
   const save = async () => {
     err.textContent = "";
     try {
