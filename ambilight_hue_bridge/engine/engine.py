@@ -112,6 +112,11 @@ class Engine:
         if not self._logged_submit:
             self._logged_submit = True
             LOGGER.info("First inbound color submitted: light=%s rgb=%s", light_id, rgb)
+        owned = self._owned_slot(owner)
+        if owned is not None and owned.is_streaming and owned.transition_task is None:
+            # The streaming TV's own frames: nothing to arbitrate (setting changes arrive through
+            # tv_settings_changed / restart_stream).
+            return
         slot = self._slot_for(owner)
         if slot is not None and self._preferred_owner(slot) == owner:
             self._schedule_reconcile(slot)
@@ -292,7 +297,7 @@ class Engine:
 
     def _owner_ready_for(self, owner: str, slot: _StreamSlot) -> bool:
         """Return whether a TV is ready to stream and its output is the slot's."""
-        return _resource_key(self._store, owner) == slot.key and self._owner_ready(owner)
+        return self._key_for(owner) == slot.key and self._owner_ready(owner)
 
     def _preferred_owner(self, slot: _StreamSlot) -> str | None:
         """Return the slot's highest-priority active, ready TV; preserve its owner on ties."""
@@ -321,7 +326,7 @@ class Engine:
 
     def _slot_for(self, owner: str) -> _StreamSlot | None:
         """Return the stream slot of a TV's output (created on first use), or None without one."""
-        key = _resource_key(self._store, owner)
+        key = self._key_for(owner)
         if key is None:
             return None
         slot = self._slots.get(key)
@@ -329,31 +334,54 @@ class Engine:
             slot = self._slots[key] = _StreamSlot(key)
         return slot
 
+    def _key_for(self, owner: str) -> str | None:
+        """Return the output (slot key) a TV streams to now, or None when it has none."""
+        key = _resource_key(self._store, owner)
+        if key is None or not key.startswith("zigbee:"):
+            return key
+        # A group keeps the slot one of its TVs already streams on, so linking an idle TV into
+        # the group (or unlinking one) does not restart that stream.
+        group = _zigbee_group(self._store, owner)
+        owned = [
+            slot.key
+            for slot in self._slots.values()
+            if slot.owner in group and slot.key.startswith("zigbee:")
+        ]
+        return min(owned) if owned else key
+
     def _owned_slot(self, owner: str) -> _StreamSlot | None:
         """Return the slot whose active or opening stream a TV owns, or None."""
         return next((slot for slot in self._slots.values() if slot.owner == owner), None)
 
     def _held_elsewhere(self, owner: str, slot: _StreamSlot) -> bool:
-        """Return whether a TV still owns, or is still closing, a stream on another output."""
+        """
+        Return whether another output still holds what a TV needs to start on this one.
+
+        That is the TV's own stream there (active, opening or still closing), or a lamp of the
+        TV that another output's stream drives or is still restoring.
+        """
+        lamps = _zigbee_lamps(self._store, owner)
         return any(
             other is not slot
             and (
                 other.owner == owner
-                or (
-                    other.closing_owner == owner
-                    and other.closing is not None
-                    and not other.closing.done()
-                )
+                or (other.closing_owner == owner and other.is_closing)
+                or not lamps.isdisjoint(other.busy_lamps)
             )
             for other in self._slots.values()
         )
 
-    def _schedule_reconcile_all(self) -> None:
-        """Schedule reconciliation of every output, including any an active TV just moved to."""
+    def _schedule_reconcile_all(self, *, skip: _StreamSlot | None = None) -> None:
+        """
+        Schedule reconciliation of every output, including any an active TV just moved to.
+
+        :param skip: An output to leave out (one that reconciles itself).
+        """
         for owner in self._active_owners:
             self._slot_for(owner)
-        for slot in self._slots.values():
-            self._schedule_reconcile(slot)
+        for slot in list(self._slots.values()):
+            if slot is not skip:
+                self._schedule_reconcile(slot)
 
     def _schedule_reconcile(self, slot: _StreamSlot) -> None:
         """Schedule serialized ownership reconciliation without blocking request handlers."""
@@ -407,6 +435,7 @@ class Engine:
                     if self._held_elsewhere(desired, slot):
                         return
                     slot.owner = desired
+                    slot.lamps = _zigbee_lamps(self._store, desired)
                 slot.buffer = self._owner_buffers.setdefault(desired, ColorBuffer())
                 started = await self._open_stream(slot, desired)
                 if started:
@@ -424,8 +453,6 @@ class Engine:
         except BaseException:
             slot.transition_task = None
             raise
-        # A TV whose target moved to another output resumes there now its old stream is closed.
-        self._schedule_reconcile_all()
         await self._reconcile(slot)
 
     async def _stop_slot(self, slot: _StreamSlot) -> None:
@@ -597,7 +624,11 @@ class Engine:
             # the next stream (or shutdown) waits for it.
             slot.closing = asyncio.create_task(backend.aclose())
             slot.closing_owner = owner
+            slot.closing_lamps = slot.lamps
         await slot.wait_for_close()
+        # A TV waiting on another output for this one's TV or lamps (a target switch, a
+        # regrouping) resumes now; this output itself restarts on its next frame as before.
+        self._schedule_reconcile_all(skip=slot)
 
 
 class _StreamSlot:
@@ -621,6 +652,9 @@ class _StreamSlot:
         # the TV it streamed for.
         self.closing: asyncio.Task[None] | None = None
         self.closing_owner: str | None = None
+        # The Zigbee lamps (IEEE) of the owning TV's stream, and of the stream still closing.
+        self.lamps: frozenset[str] = frozenset()
+        self.closing_lamps: frozenset[str] = frozenset()
         # True while restart_stream() replaces the transition; concurrent restarts coalesce.
         self.restarting = False
         self.ticker: asyncio.Task[None] | None = None
@@ -650,6 +684,17 @@ class _StreamSlot:
     def is_streaming(self) -> bool:
         """Return True while the slot's outbound stream is active."""
         return self.backend is not None and self.backend.is_streaming
+
+    @property
+    def is_closing(self) -> bool:
+        """Return True while a torn-down backend is still closing."""
+        return self.closing is not None and not self.closing.done()
+
+    @property
+    def busy_lamps(self) -> frozenset[str]:
+        """Return the Zigbee lamps this output's active, opening or closing stream drives."""
+        lamps = self.lamps if self.owner is not None else frozenset()
+        return lamps | self.closing_lamps if self.is_closing else lamps
 
     async def cancel_transition(self) -> None:
         """Cancel and await an in-flight ownership transition."""
@@ -758,15 +803,30 @@ def _resource_key(store: ConfigStore, owner: str) -> str | None:
     if user.target is not StreamTarget.ZIGBEE:
         bridge = active_bridge(store)
         return f"hue:{bridge.id}" if bridge is not None else None
-    lamps = {lamp.ieee.lower() for lamp in user.zigbee_lights}
+    group = _zigbee_group(store, owner)
+    # Named after a TV rather than a lamp, so editing a TV's own lamps keeps it on its slot.
+    return f"zigbee:{min(group)}" if group else None
+
+
+def _zigbee_lamps(store: ConfigStore, owner: str) -> frozenset[str]:
+    """Return the IEEE addresses of a Zigbee-target TV's lamps (empty for other TVs)."""
+    user = paired_user(store, owner)
+    if user is None or user.target is not StreamTarget.ZIGBEE:
+        return frozenset()
+    return frozenset(lamp.ieee.lower() for lamp in user.zigbee_lights)
+
+
+def _zigbee_group(store: ConfigStore, owner: str) -> frozenset[str]:
+    """Return the Zigbee TVs linked to a TV by shared lamps, directly or through others."""
+    lamps = set(_zigbee_lamps(store, owner))
     if not lamps:
-        return None
+        return frozenset()
     others = [
-        (other.username, {lamp.ieee.lower() for lamp in other.zigbee_lights})
+        (other.username, _zigbee_lamps(store, other.username))
         for other in store.config.users
-        if other.target is StreamTarget.ZIGBEE and other is not user
+        if other.username != owner
     ]
-    group = {user.username}
+    group = {owner}
     grown = True
     while grown:
         grown = False
@@ -775,5 +835,4 @@ def _resource_key(store: ConfigStore, owner: str) -> str | None:
                 group.add(username)
                 lamps |= other_lamps
                 grown = True
-    # Named after a TV rather than a lamp, so editing a TV's own lamps keeps it on its slot.
-    return f"zigbee:{min(group)}"
+    return frozenset(group)

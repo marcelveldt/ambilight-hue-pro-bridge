@@ -1265,3 +1265,187 @@ async def test_stop_closes_every_output(tmp_path: Path, monkeypatch) -> None:
     assert all(backend.closed for bs in backends.values() for backend in bs)
     assert not engine.is_streaming
     assert not engine.stream_owners
+
+
+class _LampBackend(_ScriptedBackend):
+    """Zigbee-like backend that records when it starts and when its (slow) close ends."""
+
+    def __init__(self, user: PairedUser, close_s: float) -> None:
+        super().__init__([])
+        self.tv = user.username
+        self.lamps = frozenset(lamp.ieee.lower() for lamp in user.zigbee_lights)
+        self.close_s = close_s
+        self.started_at: float | None = None
+        self.closed_at: float | None = None
+
+    async def start(self) -> None:
+        self.started_at = time.monotonic()
+        await asyncio.sleep(0.05)
+        self.streaming = True
+
+    async def aclose(self) -> None:
+        self.streaming = False
+        await asyncio.sleep(self.close_s)
+        self.closed_at = time.monotonic()
+
+
+def _lamp_backends(monkeypatch, close_s: dict[str, float]) -> list[_LampBackend]:
+    made: list[_LampBackend] = []
+
+    def create(_self: Engine, user: PairedUser) -> tuple[_LampBackend, str]:
+        made.append(_LampBackend(user, close_s.get(user.username, 0.2)))
+        return made[-1], user.username
+
+    monkeypatch.setattr(Engine, "_create_backend", create)
+    return made
+
+
+def _lamp_overlaps(made: list[_LampBackend]) -> list[str]:
+    """Return every start on a lamp that another TV's stream still drove or was restoring."""
+    bad = []
+    for held in made:
+        for new in made:
+            if held is new or held.tv == new.tv or held.started_at is None:
+                continue
+            if new.started_at is None or held.lamps.isdisjoint(new.lamps):
+                continue
+            held_until = held.closed_at if held.closed_at is not None else float("inf")
+            if held.started_at <= new.started_at < held_until:
+                bad.append(f"{new.tv} started while {held.tv} held {sorted(held.lamps)}")
+    return bad
+
+
+async def _pump(engine: Engine, tvs: list[str], frames: int = 40) -> None:
+    for _ in range(frames):
+        for tv in tvs:
+            engine.submit_color(tv, "1", _RED)
+        await asyncio.sleep(0.02)
+
+
+def _zigbee_engine(store: ConfigStore) -> Engine:
+    return Engine(store, rate_hz=50, home_assistant=_FakeHomeAssistant())  # type: ignore[arg-type]
+
+
+async def test_split_group_waits_for_the_shared_lamp_restore(tmp_path: Path, monkeypatch) -> None:
+    """A TV split off a group starts only after the other stream released the shared lamp."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    first = _add_zigbee_tv(store, "tv1", [_LAMP_A, _LAMP_B], priority=5)
+    _add_zigbee_tv(store, "tv2", [_LAMP_B, _LAMP_C])
+    made = _lamp_backends(monkeypatch, {"tv1": 0.4})
+    engine = _zigbee_engine(store)
+    engine.submit_color("tv1", "1", _RED)
+    engine.submit_color("tv2", "1", _RED)
+    assert await _wait_until(lambda: engine.is_streaming)
+    first.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_A)]
+    first.lights = lights_from_zigbee(first.zigbee_lights)
+    await engine.restart_stream("tv1")
+    engine.tv_settings_changed("tv1")
+    await _pump(engine, ["tv1", "tv2"])
+    assert engine.stream_owners == {"tv1", "tv2"}
+    assert _lamp_overlaps(made) == []
+    await engine.stop()
+
+
+async def test_merged_outputs_wait_for_the_other_stream_to_close(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Two streams merged by a lamp edit never drive the shared lamps at the same time."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    _add_zigbee_tv(store, "tvb", [_LAMP_A])
+    winner = _add_zigbee_tv(store, "tva", [_LAMP_B], priority=10)
+    made = _lamp_backends(monkeypatch, {"tvb": 0.5, "tva": 0.1})
+    engine = _zigbee_engine(store)
+    assert engine.start_stream("tvb")
+    assert engine.start_stream("tva")
+    assert await _wait_until(lambda: len(made) == 2 and all(backend.streaming for backend in made))
+    winner.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_A), ZigbeeLightRef(ieee=_LAMP_B)]
+    winner.lights = lights_from_zigbee(winner.zigbee_lights)
+    await engine.restart_stream("tva")
+    engine.tv_settings_changed("tva")
+    await _pump(engine, ["tva", "tvb"])
+    assert engine.stream_owners == {"tva"}
+    assert _lamp_overlaps(made) == []
+    await engine.stop()
+
+
+async def test_merge_winner_from_another_output_resumes_without_a_frame(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The higher-priority TV of a merge takes the merged output once its old stream closed."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    _add_zigbee_tv(store, "tvb", [_LAMP_A], priority=10)
+    loser = _add_zigbee_tv(store, "tva", [_LAMP_B])
+    made = _lamp_backends(monkeypatch, {"tvb": 0.3, "tva": 0.05})
+    engine = _zigbee_engine(store)
+    assert engine.start_stream("tvb")
+    assert engine.start_stream("tva")
+    assert await _wait_until(lambda: len(made) == 2 and all(backend.streaming for backend in made))
+    loser.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_A), ZigbeeLightRef(ieee=_LAMP_B)]
+    loser.lights = lights_from_zigbee(loser.zigbee_lights)
+    await engine.restart_stream("tva")
+    engine.tv_settings_changed("tva")
+    assert await _wait_until(
+        lambda: engine.stream_owners == {"tvb"} and engine.is_streaming, max_wait=1.5
+    )
+    await engine.stop()
+
+
+async def test_linking_an_idle_tv_keeps_the_live_stream(tmp_path: Path, monkeypatch) -> None:
+    """Giving an idle TV a lamp of a streaming TV does not restart that stream."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    _add_zigbee_tv(store, "tvz", [_LAMP_A], priority=10)
+    idle = _add_zigbee_tv(store, "tv1", [_LAMP_B])
+    made = _lamp_backends(monkeypatch, {"tvz": 0.05})
+    engine = _zigbee_engine(store)
+    engine.submit_color("tvz", "1", _RED)
+    assert await _wait_until(lambda: engine.is_streaming)
+    idle.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_A)]
+    idle.lights = lights_from_zigbee(idle.zigbee_lights)
+    await engine.restart_stream("tv1")
+    engine.tv_settings_changed("tv1")
+    await _pump(engine, ["tvz"], 20)
+    assert len(made) == 1
+    assert made[0].streaming
+    await engine.stop()
+
+
+async def test_unlinking_an_idle_tv_frees_the_waiting_tv(tmp_path: Path, monkeypatch) -> None:
+    """When an idle TV that linked two others drops its lamps, the waiting one starts at once."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    linker = _add_zigbee_tv(store, "tv1", [_LAMP_A, _LAMP_B])
+    _add_zigbee_tv(store, "tv2", [_LAMP_B], priority=10)
+    _add_zigbee_tv(store, "tv3", [_LAMP_A])
+    made = _lamp_backends(monkeypatch, {})
+    engine = _zigbee_engine(store)
+    assert engine.start_stream("tv2")
+    assert not engine.start_stream("tv3")  # waits: tv2 wins their shared output
+    assert await _wait_until(lambda: engine.stream_owners == {"tv2"} and engine.is_streaming)
+    linker.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_C)]
+    linker.lights = lights_from_zigbee(linker.zigbee_lights)
+    engine.tv_settings_changed("tv1")
+    assert await _wait_until(lambda: engine.stream_owners == {"tv2", "tv3"})
+    assert len(made) == 2
+    await engine.stop()
+
+
+async def test_removing_a_linking_tv_frees_the_waiting_tv(tmp_path: Path, monkeypatch) -> None:
+    """Removing an idle TV that linked two others lets the waiting one start at once."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    _add_zigbee_tv(store, "tv1", [_LAMP_A, _LAMP_B])
+    _add_zigbee_tv(store, "tv2", [_LAMP_B], priority=10)
+    _add_zigbee_tv(store, "tv3", [_LAMP_A])
+    _lamp_backends(monkeypatch, {})
+    engine = _zigbee_engine(store)
+    assert engine.start_stream("tv2")
+    assert not engine.start_stream("tv3")  # waits: tv2 wins their shared output
+    assert await _wait_until(lambda: engine.stream_owners == {"tv2"} and engine.is_streaming)
+    store.config.users = [user for user in store.config.users if user.username != "tv1"]
+    await engine.remove_tv("tv1")
+    assert await _wait_until(lambda: engine.stream_owners == {"tv2", "tv3"})
+    await engine.stop()
