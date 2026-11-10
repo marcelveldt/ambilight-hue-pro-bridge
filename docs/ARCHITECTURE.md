@@ -308,8 +308,9 @@ Goal: **when no TV is driving lights, the process is a few idle sockets at ~0% C
    lamp (directly or through another TV) share one. TVs on different outputs stream at the same
    time, except that all Zigbee streams share the mesh's airtime: at most one fast Zigbee stream
    (a TV streaming entertainment, 25 Hz) and one slow one (a v1 REST TV, 5 Hz with the lamps
-   fading between frames) run at once, and a higher-priority TV of the same kind takes over. Per output, track requests per TV, select the highest-priority enabled owner, and preempt
-   only for a strictly higher priority; a failed start or a foreign takeover backs off that output
+   fading between frames) run at once, and a higher-priority TV of the same kind takes over. Per
+   output, track requests per TV, select the highest-priority enabled owner, and preempt only for
+   a strictly higher priority; a failed start or a foreign takeover backs off that output
    only. Start the outbound stream **lazily** on activation or the first inbound write; **tear
    down** after an inactivity timeout. The ticker runs only while streaming, and per-TV color
    buffers prevent a waiting TV from overwriting the owner's same-numbered lights.

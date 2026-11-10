@@ -197,7 +197,8 @@ class Engine:
         slot = self._slot_for(owner)
         if slot is None or not self._owner_ready(owner):
             return True
-        preferred = self._preferred_owner(slot)
+        # Denied only for a TV on its own output; waiting for Zigbee capacity is accepted quietly.
+        preferred = self._preferred_owner(slot, class_aware=False)
         if preferred != owner:
             LOGGER.warning(
                 "Denying entertainment stream for %s: %s has equal or higher priority",
@@ -299,6 +300,9 @@ class Engine:
         """Stop every outbound stream and any background tasks."""
         self._active_owners.clear()
         self._request_order.clear()
+        for task in list(self._background):
+            task.cancel()
+        await asyncio.gather(*self._background, return_exceptions=True)
         await asyncio.gather(*(self._stop_slot(slot) for slot in self._slots.values()))
 
     def _remember_request(self, owner: str) -> None:
@@ -321,22 +325,30 @@ class Engine:
         area, _ = tv_stream_target(self._store, owner)
         return bool(area)
 
-    def _owner_ready_for(self, owner: str, slot: _StreamSlot) -> bool:
-        """Return whether a TV is ready to stream and its output is the slot's."""
+    def _owner_ready_for(self, owner: str, slot: _StreamSlot, *, class_aware: bool = True) -> bool:
+        """
+        Return whether a TV is ready to stream and its output is the slot's.
+
+        :param class_aware: Also apply the one-fast/one-slow Zigbee stream limit.
+        """
         return (
             self._key_for(owner) == slot.key
             and self._owner_ready(owner)
-            and not self._outranked(owner, slot)
+            and not (class_aware and self._outranked(owner, slot))
         )
 
-    def _preferred_owner(self, slot: _StreamSlot) -> str | None:
-        """Return the slot's highest-priority active, ready TV; preserve its owner on ties."""
+    def _preferred_owner(self, slot: _StreamSlot, *, class_aware: bool = True) -> str | None:
+        """
+        Return the slot's highest-priority active, ready TV; preserve its owner on ties.
+
+        :param class_aware: Also apply the one-fast/one-slow Zigbee stream limit.
+        """
         now = time.monotonic()
         candidates = [
             owner
             for owner in self._active_owners
             if now - self._last_updates.get(owner, 0.0) < IDLE_TIMEOUT_S
-            and self._owner_ready_for(owner, slot)
+            and self._owner_ready_for(owner, slot, class_aware=class_aware)
         ]
         if not candidates:
             return None
@@ -410,21 +422,28 @@ class Engine:
         ]
 
     def _outranked(self, owner: str, slot: _StreamSlot) -> bool:
-        """Return whether a higher-priority Zigbee TV of the same class wants another output."""
+        """
+        Return whether a Zigbee TV must yield its kind of stream to a TV on another output.
+
+        That TV must be of the same class (fast or slow) and win its own output, and have a
+        higher priority, unless this TV no longer requests streaming at all.
+        """
         zigbee_class = self._zigbee_class(owner)
         if not zigbee_class:
             return False
-        now = time.monotonic()
+        released = owner not in self._active_owners
         priority = self._priority(owner)
-        return any(
-            rival != owner
-            and self._priority(rival) > priority
-            and self._zigbee_class(rival) == zigbee_class
-            and now - self._last_updates.get(rival, 0.0) < IDLE_TIMEOUT_S
-            and self._owner_ready(rival)
-            and self._key_for(rival) != slot.key
-            for rival in self._active_owners
-        )
+        for rival in self._active_owners:
+            if rival == owner or self._zigbee_class(rival) != zigbee_class:
+                continue
+            if not released and self._priority(rival) <= priority:
+                continue
+            rival_slot = self._slot_for(rival)
+            if rival_slot is None or rival_slot is slot:
+                continue
+            if self._preferred_owner(rival_slot, class_aware=False) == rival:
+                return True
+        return False
 
     def _zigbee_class(self, owner: str) -> str:
         """Return a Zigbee-target TV's stream class (fast or slow), or "" for other TVs."""
@@ -887,8 +906,9 @@ def _resource_key(store: ConfigStore, owner: str) -> str | None:
         bridge = active_bridge(store)
         return f"hue:{bridge.id}" if bridge is not None else None
     group = _zigbee_group(store, owner)
-    # Named after a TV rather than a lamp, so editing a TV's own lamps keeps it on its slot.
-    return f"zigbee:{min(group)}" if group else None
+    # Named after the group's TVs rather than its lamps, so editing lamps within a group keeps
+    # its slot, and a group never takes the name a live stream of an earlier group still holds.
+    return f"zigbee:{','.join(sorted(group))}" if group else None
 
 
 def _zigbee_lamps(store: ConfigStore, owner: str) -> frozenset[str]:

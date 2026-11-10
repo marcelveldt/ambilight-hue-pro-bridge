@@ -166,8 +166,9 @@ directly at `http://<ha-host>:80`. See [addon/README.md](addon/README.md) for de
 
 Each TV card has an **enabled** toggle and a **stream priority** from 0 to 100. Priority settles
 which TV streams when several want the same output: the Hue bridge (one stream at a time), or Zigbee
-(one fast and one slow stream, never two on the same lamp). Higher values win; the current TV keeps the stream on a tie. A higher-priority
-request closes the current entertainment session before opening the new TV's area. A disabled TV
+(one fast and one slow stream, never two on the same lamp). Higher values win; the current TV keeps
+the stream on a tie. A higher-priority request closes the current entertainment session before
+opening the new TV's area. A disabled TV
 stays connected to the virtual bridge but cannot stream to the real bridge; enabling it starts its
 pending request unless a higher-priority TV is active on its output.
 

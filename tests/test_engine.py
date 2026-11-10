@@ -1541,3 +1541,86 @@ async def test_tv_that_starts_streaming_moves_to_the_fast_rate(tmp_path: Path, m
     assert engine.start_stream("tv1")
     assert await _wait_until(lambda: rates == [5.0, 25.0] and engine.is_streaming)
     await engine.stop()
+
+
+async def test_tv_split_off_a_streaming_group_gets_its_own_output(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A TV that leaves a streaming TV's group streams on its own output, not the old one."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    tva = _add_zigbee_tv(store, "tva", [_LAMP_A, _LAMP_B])
+    _add_zigbee_tv(store, "tvb", [_LAMP_B])
+    _backends_by_tv(monkeypatch, lambda _user: _CountingBackend())
+    engine = _zigbee_engine(store)
+    assert engine.start_stream("tvb")  # fast, streams on the tva+tvb output
+    assert await _wait_until(lambda: engine.stream_owners == {"tvb"} and engine.is_streaming)
+    tva.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_A)]
+    tva.lights = lights_from_zigbee(tva.zigbee_lights)
+    await engine.restart_stream("tva")
+    engine.tv_settings_changed("tva")
+    await _pump(engine, ["tvb", "tva"], 40)  # tva only pushes REST colors: slow
+    assert engine._key_for("tva") != engine._key_for("tvb")
+    assert engine.stream_owners == {"tva", "tvb"}
+    await engine.stop()
+
+
+async def test_rival_that_loses_its_own_output_does_not_take_the_stream(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A higher-priority fast TV that cannot win its own lamps leaves the fast stream alone."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    _add_zigbee_tv(store, "low", [_LAMP_A])
+    _add_zigbee_tv(store, "high", [_LAMP_B], priority=10)
+    _add_zigbee_tv(store, "mid", [_LAMP_B, _LAMP_C], priority=20)
+    _backends_by_tv(monkeypatch, lambda _user: _CountingBackend())
+    engine = _zigbee_engine(store)
+    assert engine.start_stream("low")
+    assert await _wait_until(lambda: engine.stream_owners == {"low"} and engine.is_streaming)
+    engine.submit_color("mid", "1", _RED)  # slow, wins the high/mid output
+    await _pump(engine, ["mid"], 10)
+    engine.start_stream("high")
+    await _pump(engine, ["low", "high", "mid"], 40)
+    engine.tv_settings_changed("mid")  # an unrelated re-check must not drop it either
+    await _pump(engine, ["low", "high", "mid"], 20)
+    assert engine.stream_owners == {"low", "mid"}
+    await engine.stop()
+
+
+async def test_releasing_a_zigbee_stream_hands_its_kind_to_another_output(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A TV turning its stream off frees the fast stream for a TV waiting on other lamps."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    _add_zigbee_tv(store, "tv1", [_LAMP_A])
+    _add_zigbee_tv(store, "tv2", [_LAMP_B])
+    _backends_by_tv(monkeypatch, lambda _user: _CountingBackend())
+    engine = _zigbee_engine(store)
+    assert engine.start_stream("tv1")
+    assert await _wait_until(lambda: engine.stream_owners == {"tv1"} and engine.is_streaming)
+    assert engine.start_stream("tv2")  # waits for the fast stream, not denied
+    await _pump(engine, ["tv1", "tv2"], 10)
+    engine.release_stream("tv1")
+    await _pump(engine, ["tv2"], 20)  # well within the 10 s idle timeout
+    assert engine.stream_owners == {"tv2"}
+    await engine.stop()
+
+
+async def test_waiting_for_zigbee_capacity_is_not_a_denial(tmp_path: Path, monkeypatch) -> None:
+    """A TV waiting for the fast Zigbee stream is accepted, whatever its priority."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    _add_zigbee_tv(store, "low", [_LAMP_A])
+    _add_zigbee_tv(store, "high", [_LAMP_B], priority=10)
+    _add_zigbee_tv(store, "peer", [_LAMP_C], priority=10)
+    _backends_by_tv(monkeypatch, lambda _user: _CountingBackend())
+    engine = _zigbee_engine(store)
+    assert engine.start_stream("high")
+    assert await _wait_until(lambda: engine.stream_owners == {"high"} and engine.is_streaming)
+    assert engine.start_stream("low")
+    assert engine.start_stream("peer")
+    await _pump(engine, ["high", "low", "peer"], 10)
+    assert engine.stream_owners == {"high"}
+    await engine.stop()
