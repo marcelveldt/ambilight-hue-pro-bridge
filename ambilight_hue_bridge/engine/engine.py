@@ -429,7 +429,7 @@ class Engine:
         if not self._is_zigbee(owner):
             return False
         rank = self._zigbee_rank(owner)
-        above = 0
+        above: set[str] = set()  # keys of the other outputs held or won by a higher-ranked TV
         for rival in self._active_owners:
             if rival == owner or not self._is_zigbee(rival) or self._zigbee_rank(rival) <= rank:
                 continue
@@ -438,8 +438,19 @@ class Engine:
                 continue
             # Rivals that win their own output; at most one per output.
             if self._preferred_owner(rival_slot, lane_aware=False) == rival:
-                above += 1
-        return above >= _ZIGBEE_LANES
+                above.add(rival_slot.key)
+        # A TV that released its stream but keeps it warm still holds its lane.
+        for other in self._slots.values():
+            holder = other.owner
+            if (
+                other is not slot
+                and holder is not None
+                and holder not in self._active_owners
+                and self._is_zigbee(holder)
+                and self._zigbee_rank(holder) > rank
+            ):
+                above.add(other.key)
+        return len(above) >= _ZIGBEE_LANES
 
     def _is_zigbee(self, owner: str) -> bool:
         """Return whether a TV streams to Zigbee lamps."""

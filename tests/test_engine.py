@@ -1666,6 +1666,27 @@ async def test_released_stream_leaves_lane_one_until_the_tv_resumes(
     await engine.stop()
 
 
+async def test_two_released_streams_make_way_for_a_third_tv(tmp_path: Path, monkeypatch) -> None:
+    """With both lanes kept warm by released streams, a new TV takes the lower-ranked one's lane."""
+    store = _store_with_zigbee_tvs(
+        tmp_path, ("tv1", _LAMP_A, 0), ("tv2", _LAMP_B, 5), ("tv3", _LAMP_C, 0)
+    )
+    backends = _lane_backends(monkeypatch, store)
+    engine = _zigbee_engine(store)
+    assert engine.start_stream("tv1")
+    assert await _wait_until(lambda: "tv1" in backends and engine.is_streaming)
+    assert engine.start_stream("tv2")
+    await _pump(engine, ["tv1", "tv2"], 10)
+    engine.release_stream("tv1")
+    engine.release_stream("tv2")
+    assert engine.start_stream("tv3")
+    await _pump(engine, ["tv3"], 25)  # well within the idle timeout of the warm streams
+    assert engine.stream_owners == {"tv2", "tv3"}
+    assert backends["tv1"][0].closed_at is not None
+    assert backends["tv2"][0].closed_at is None
+    await engine.stop()
+
+
 async def test_rest_tvs_stream_at_most_five_hz_in_either_lane(tmp_path: Path, monkeypatch) -> None:
     """TVs that only push REST colors take both lanes at 5 Hz, also after moving up a lane."""
     store = _store_with_zigbee_tvs(tmp_path, ("tv1", _LAMP_A, 10), ("tv2", _LAMP_B, 0))
