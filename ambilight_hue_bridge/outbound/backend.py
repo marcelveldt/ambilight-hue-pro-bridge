@@ -155,12 +155,11 @@ class ZigbeeBackend:
             lamps.
         :raises ZigguratError: When the Ziggurat server can't be reached.
         """
-        url = await self._home_assistant.ziggurat_url()
+        # The network address can change (a lamp rejoining), so resolve it fresh on every start.
+        url, addresses = await self._home_assistant.stream_info()
         if url is None:
             msg = "ZHA does not run on a Ziggurat server"
             raise HomeAssistantError(msg)
-        # The network address can change (a lamp rejoining), so resolve it fresh on every start.
-        addresses = {light.ieee: light.nwk for light in await self._home_assistant.hue_lights()}
         lights: list[ZigbeeLight] = []
         for channel_id, lamp in enumerate(self._lamps):
             nwk = addresses.get(lamp.ieee.lower())

@@ -34,6 +34,8 @@ _HEALTH_FAILS_TO_RECOVER = 2
 # After another controller takes the area over, wait this long before re-grabbing it, so we don't
 # fight a deliberate Hue-app / Sync-box stream on every frame.
 _FOREIGN_BACKOFF_S = 60.0
+# After a failed start, wait this long before the next attempt instead of retrying on every frame.
+_START_RETRY_BACKOFF_S = 3.0
 # Identify ("blink this light", from the TV's Hue alert during setup): flash full white on/off
 # over the stream for a short window ("select") or a longer one ("lselect").
 _IDENTIFY_SELECT_S = 2.0
@@ -80,7 +82,7 @@ class Engine:
         self._request_order: dict[str, int] = {}
         self._next_request_order = 0
         # Monotonic time before which a new stream won't be opened (set when another controller
-        # took the area over, so we back off rather than fight it).
+        # took the area over, so we back off rather than fight it, or after a failed start).
         self._regrab_block_until = 0.0
         # Set by the health monitor when the bridge has ended our stream; the ticker watches it
         # and tears down (keeping teardown a single-owner path).
@@ -466,6 +468,7 @@ class Engine:
             raise
         except Exception:
             LOGGER.exception("Failed to start outbound stream to %s", target)
+            self._regrab_block_until = time.monotonic() + _START_RETRY_BACKOFF_S
             with suppress(Exception):
                 await backend.aclose()
             if self._stream_owner == owner:

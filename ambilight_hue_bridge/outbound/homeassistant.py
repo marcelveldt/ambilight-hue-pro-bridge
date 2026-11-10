@@ -105,13 +105,22 @@ class HomeAssistantClient:
 
         :raises HomeAssistantError: When Home Assistant or ZHA is unavailable.
         """
-        # The response also holds the network key: only the device path is ever read from it.
         (settings,) = await self._call("zha/network/settings")
-        device = settings.get("device") if isinstance(settings, dict) else None
-        path = device.get("path") if isinstance(device, dict) else None
-        if isinstance(path, str) and path.startswith(("ws://", "wss://")):
-            return path
-        return None
+        return _ziggurat_path(settings)
+
+    async def stream_info(self) -> tuple[str | None, dict[str, int]]:
+        """
+        Return ZHA's Ziggurat server URL (None for another radio) and the network address per IEEE.
+
+        :raises HomeAssistantError: When Home Assistant or ZHA is unavailable.
+        """
+        settings, devices = await self._call("zha/network/settings", "zha/devices")
+        addresses: dict[str, int] = {}
+        for device in devices:
+            nwk = _parse_nwk(device.get("nwk"))
+            if nwk is not None:
+                addresses[str(device.get("ieee", "")).lower()] = nwk
+        return _ziggurat_path(settings), addresses
 
     def _connection(self) -> tuple[str, str] | None:
         """Return the (websocket URL, token) to connect with, or None when not set up."""
@@ -160,6 +169,16 @@ def _websocket_url(url: str) -> str:
     if url.startswith("http"):
         url = "ws" + url.removeprefix("http")
     return url if url.endswith("/api/websocket") else f"{url}/api/websocket"
+
+
+def _ziggurat_path(settings: Any) -> str | None:
+    """Return the Ziggurat websocket URL from ZHA's network settings, or None for another radio."""
+    # The settings also hold the network key: only the device path is ever read from them.
+    device = settings.get("device") if isinstance(settings, dict) else None
+    path = device.get("path") if isinstance(device, dict) else None
+    if isinstance(path, str) and path.startswith(("ws://", "wss://")):
+        return path
+    return None
 
 
 def _parse_nwk(value: Any) -> int | None:

@@ -20,7 +20,6 @@ from ambilight_hue_bridge.engine.ingest import ColorBuffer
 from ambilight_hue_bridge.engine.mapping import map_to_commands
 from ambilight_hue_bridge.outbound.backend import BackendHealth, HueBridgeBackend, ZigbeeBackend
 from ambilight_hue_bridge.outbound.controller import lights_from_zigbee
-from ambilight_hue_bridge.outbound.homeassistant import ZhaLight
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -632,6 +631,29 @@ async def test_health_ok_between_misses_keeps_streaming(tmp_path: Path, monkeypa
     await engine.stop()
 
 
+async def test_failed_start_backs_off_before_retrying(tmp_path: Path, monkeypatch) -> None:
+    """A start that fails is retried after a pause, not on every inbound frame."""
+    starts: list[float] = []
+
+    class _FailingBackend(_ScriptedBackend):
+        async def start(self) -> None:
+            starts.append(time.monotonic())
+            msg = "lamps unreachable"
+            raise OSError(msg)
+
+    monkeypatch.setattr(Engine, "_create_backend", lambda _self, _user: (_FailingBackend([]), "x"))
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine._START_RETRY_BACKOFF_S", 0.3)
+    engine = Engine(_configured_store(tmp_path), rate_hz=100)
+    for _ in range(10):
+        engine.submit_color("tv1", "1", (65535, 0, 0))
+        await asyncio.sleep(0.02)
+    assert len(starts) == 1
+    await asyncio.sleep(0.3)
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    assert await _wait_until(lambda: len(starts) == 2)
+    await engine.stop()
+
+
 async def test_stop_during_cancellable_connect_closes_session(tmp_path: Path, monkeypatch) -> None:
     """A stop whose cancel lands on a cancellable await in start() still closes the session."""
     gate = asyncio.Event()
@@ -667,11 +689,8 @@ class _FakeHomeAssistant:
     def __init__(self, *, available: bool = True) -> None:
         self.available = available
 
-    async def ziggurat_url(self) -> str:
-        return "ws://core-ziggurat:9999"
-
-    async def hue_lights(self) -> list[ZhaLight]:
-        return [ZhaLight(ieee="00:17:88:01:00:00:00:01", nwk=0x1111, name="Lamp")]
+    async def stream_info(self) -> tuple[str, dict[str, int]]:
+        return "ws://core-ziggurat:9999", {"00:17:88:01:00:00:00:01": 0x1111}
 
 
 class _FakeZigbeeSession:

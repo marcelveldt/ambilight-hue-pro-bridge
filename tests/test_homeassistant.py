@@ -191,6 +191,16 @@ async def test_ziggurat_url_reads_the_device_path(
     assert _TOKEN not in caplog.text
 
 
+async def test_stream_info_returns_url_and_addresses(tmp_path: Path, fake_ha) -> None:
+    """One connection yields the Ziggurat URL and every device's network address."""
+    fake, url = fake_ha
+    ziggurat, addresses = await _client(tmp_path, url).stream_info()
+    assert ziggurat == "ws://core-ziggurat:9999"
+    assert addresses["00:17:88:01:00:00:00:01"] == 6699
+    assert addresses["00:17:88:01:00:00:00:02"] == 0x1A2B
+    assert fake.commands == ["zha/network/settings", "zha/devices"]
+
+
 async def test_ziggurat_url_is_none_for_a_serial_radio(tmp_path: Path, fake_ha) -> None:
     """A non-websocket radio path (a serial Zigbee stick) means ZHA does not run on Ziggurat."""
     fake, url = fake_ha

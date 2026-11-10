@@ -131,11 +131,8 @@ class _FakeHomeAssistant:
         self.url = url
         self.lights = lights
 
-    async def ziggurat_url(self) -> str | None:
-        return self.url
-
-    async def hue_lights(self) -> list[ZhaLight]:
-        return self.lights
+    async def stream_info(self) -> tuple[str | None, dict[str, int]]:
+        return self.url, {light.ieee: light.nwk for light in self.lights}
 
 
 class _FakeZigbeeSession:
