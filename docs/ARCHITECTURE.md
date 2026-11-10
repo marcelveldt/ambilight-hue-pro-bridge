@@ -375,8 +375,8 @@ What's built and verified live against both Ambilight generations:
   identify (blink over the stream), and one stream per output (a Hue bridge, or a Zigbee lamp set).
 - **Web UI** — bridge pairing, per-TV area assignment + smoothing, and TV removal. It shares
   the app (and port) with the Hue API; as an add-on it answers only the Supervisor's ingress
-  proxy (`172.30.32.2`) and Home Assistant on the host (loopback), so the LAN only reaches the
-  TV-facing routes.
+  proxy (`172.30.32.2`) and the host itself (loopback, e.g. HA REST commands), so the LAN only
+  reaches the TV-facing routes.
 - **Zigbee lights target** — per TV, stream straight to Hue lamps in Home Assistant's ZHA
   instead of a Hue bridge (below).
 

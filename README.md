@@ -189,8 +189,9 @@ curl -X PUT http://<bridge-host>:80/cfg/tvs/<username> \
 ```
 
 The response is the updated TV object. As a Home Assistant add-on, the web UI and `/cfg` API
-answer only Home Assistant: use `127.0.0.1` as `<bridge-host>` in a REST command or sensor (Home
-Assistant shares the host's network); other devices get a 403. Run standalone, they have no
+answer only the Home Assistant sidebar and the Home Assistant host itself: use `127.0.0.1` or
+`localhost` as `<bridge-host>` in a REST command or sensor (Home Assistant shares the host's
+network). Calls through the host's LAN address or from other devices get a 403. Run standalone, they have no
 authentication, so expose them only on a trusted LAN.
 
 ### Docker

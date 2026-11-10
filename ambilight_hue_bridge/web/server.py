@@ -96,6 +96,8 @@ class WebServer:
 
         As a Home Assistant add-on, both answer only Home Assistant: its ingress proxy and
         Home Assistant itself on this host. Any other client gets a 403.
+
+        :param app: The application that also serves the Hue API.
         """
         routes = app.add_routes(
             [
