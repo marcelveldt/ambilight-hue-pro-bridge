@@ -638,10 +638,13 @@ class _SlowBackend(_ScriptedBackend):
         super().__init__([])
         self.frames = 0
         self.closed = False
+        self.started_at = 0.0
+        self.closed_at = 0.0
 
     async def start(self) -> None:
         await asyncio.sleep(0.1)
         self.streaming = True
+        self.started_at = time.monotonic()
 
     def send(self, _commands: object) -> None:
         self.frames += 1
@@ -650,6 +653,7 @@ class _SlowBackend(_ScriptedBackend):
         self.streaming = False
         await asyncio.sleep(0.2)
         self.closed = True
+        self.closed_at = time.monotonic()
 
 
 async def test_lost_stream_restarts_while_the_tv_keeps_sending(tmp_path: Path, monkeypatch) -> None:
@@ -693,10 +697,15 @@ async def test_restart_stream_reopens_the_active_stream(tmp_path: Path, monkeypa
     engine = Engine(_configured_store(tmp_path), rate_hz=50)
     engine.submit_color("tv1", "1", (65535, 0, 0))
     assert await _wait_until(lambda: engine.is_streaming)
-    await engine.restart_stream("tv1")
-    assert backends[0].closed
-    engine.submit_color("tv1", "1", (65535, 0, 0))
+    restart = asyncio.create_task(engine.restart_stream("tv1"))
+    # The TV keeps sending while the old backend closes: no replacement may start before that.
+    for _ in range(20):
+        engine.submit_color("tv1", "1", (65535, 0, 0))
+        await asyncio.sleep(0.02)
+    await restart
     assert await _wait_until(lambda: len(backends) == 2 and engine.is_streaming)
+    assert backends[0].closed
+    assert backends[1].started_at >= backends[0].closed_at
     assert engine.stream_owner == "tv1"
     await engine.restart_stream("someone-else")  # not the owner: nothing happens
     assert len(backends) == 2

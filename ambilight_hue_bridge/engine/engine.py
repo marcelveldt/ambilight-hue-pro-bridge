@@ -250,8 +250,9 @@ class Engine:
             return
         self._stream_gen += 1
         await self._cancel_transition()
-        await self._teardown()
-        self._schedule_reconcile()
+        # The teardown runs as the ownership transition, so frames arriving while the old backend
+        # closes (restoring Zigbee lamps) can't start a replacement alongside it.
+        self._transition_task = asyncio.create_task(self._restart())
 
     def identify(self, owner: str, light_id: str, *, sustained: bool = False) -> None:
         """
@@ -395,6 +396,15 @@ class Engine:
                 return
         finally:
             self._transition_task = None
+
+    async def _restart(self) -> None:
+        """Tear the active stream down, then reconcile; runs as the transition task."""
+        try:
+            await self._teardown()
+        except BaseException:
+            self._transition_task = None
+            raise
+        await self._reconcile()
 
     def _apply_smoothing(self, lights: list[VirtualLight]) -> None:
         """
