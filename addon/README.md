@@ -13,9 +13,9 @@ over the low-latency Entertainment API.
 2. Open the **⋮** menu (top right) → **Repositories**, and add:
    `https://github.com/marcelveldt/ambilight-hue-pro-bridge`
 3. Install the **Ambilight+Hue Pro Bridge** add-on and start it.
-4. Open the web UI — either **Open Web UI** on the add-on page / the **Ambilight Bridge** sidebar
-   entry (ingress, no extra port), or directly at `http://<your-ha-host>:80`. Pair your real Hue
-   bridge and assign each TV an entertainment area, enabled state, and stream priority.
+4. Open the web UI with **Open Web UI** on the add-on page or the **Ambilight Bridge** sidebar
+   entry (ingress). Pair your real Hue bridge and assign each TV an entertainment area, enabled
+   state, and stream priority.
 
 ## Configuration
 
@@ -36,7 +36,8 @@ stops.
 
 The bridge runs with **host networking** (required for SSDP/mDNS discovery and for the virtual
 bridge to appear on the LAN), so it binds the host's `http_port`. Make sure nothing else on the
-host already uses it.
+host already uses it. On that port the LAN only gets the Hue API the TVs use; the web UI answers
+only Home Assistant.
 
 State (your bridge credentials and the rotating log) is stored in the add-on's persistent
 `/data`, so it survives restarts and updates.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from ipaddress import ip_address
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +32,8 @@ from ambilight_hue_bridge.outbound.controller import (
 from ambilight_hue_bridge.outbound.homeassistant import HomeAssistantClient, HomeAssistantError
 
 if TYPE_CHECKING:
+    from aiohttp.typedefs import Handler
+
     from ambilight_hue_bridge.config.models import PairedUser, RealBridge
     from ambilight_hue_bridge.config.store import ConfigStore
     from ambilight_hue_bridge.engine.engine import Engine
@@ -44,6 +47,10 @@ _PAIR_ERRORS = (TimeoutError, OSError, aiohttp.ClientError)
 _LIST_AREAS_TIMEOUT = 5.0
 _MIN_STREAM_PRIORITY = 0
 _MAX_STREAM_PRIORITY = 100
+# The Supervisor's address on its Docker network: Home Assistant ingress requests reach an add-on
+# from here, also with host networking.
+_SUPERVISOR_IP = ip_address("172.30.32.2")
+_ADDON_ONLY_TEXT = "Open the bridge configuration from the Home Assistant sidebar."
 
 
 class WebServer:
@@ -78,13 +85,19 @@ class WebServer:
         self._lamps_lock = asyncio.Lock()
         self._host_ip = host_ip
         self._http_port = http_port
+        self._resources: frozenset[web.AbstractResource | None] = frozenset()
         # Cached once so the index handler can inject the ingress <base> per request without
         # blocking file I/O on the event loop.
         self._index_html = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
     def register(self, app: web.Application) -> None:
-        """Register the web UI page and its JSON config API (under /cfg) on the app."""
-        app.add_routes(
+        """
+        Register the web UI page and its JSON config API (under /cfg) on the app.
+
+        As a Home Assistant add-on, both answer only Home Assistant: its ingress proxy and
+        Home Assistant itself on this host. Any other client gets a 403.
+        """
+        routes = app.add_routes(
             [
                 web.get("/", self._handle_index),
                 web.get("/cfg/status", self._handle_status),
@@ -103,6 +116,10 @@ class WebServer:
                 web.delete("/cfg/bridges/{bridge_id}", self._handle_delete_bridge),
             ],
         )
+        # Per resource rather than per route: aiohttp adds the HEAD route of a GET itself.
+        self._resources = frozenset(route.resource for route in routes)
+        if self._home_assistant.is_addon:
+            app.middlewares.append(self._home_assistant_only)
 
     async def _handle_index(self, request: web.Request) -> web.StreamResponse:
         """Serve the single-page configuration UI, rewriting the <base> for HA ingress."""
@@ -374,6 +391,16 @@ class WebServer:
         self._store.save()
         return web.json_response(self._home_assistant_dict())
 
+    @web.middleware
+    async def _home_assistant_only(
+        self, request: web.Request, handler: Handler
+    ) -> web.StreamResponse:
+        """Pass the web UI and /cfg requests from Home Assistant on; answer others with a 403."""
+        ui_request = request.match_info.route.resource in self._resources
+        if ui_request and not _from_home_assistant(request):
+            return web.Response(status=403, text=_ADDON_ONLY_TEXT)
+        return await handler(request)
+
     def _tv_dict(self, user: PairedUser, owners: frozenset[str]) -> dict[str, Any]:
         """Build the JSON representation of a paired TV (with its assignment) for the UI."""
         return {
@@ -521,6 +548,15 @@ async def _read_json(request: web.Request) -> dict[str, Any]:
     except ValueError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _from_home_assistant(request: web.Request) -> bool:
+    """Return True for a request from the Supervisor (ingress) or from this host."""
+    try:
+        peer = ip_address(request.remote or "")
+    except ValueError:
+        return False
+    return peer == _SUPERVISOR_IP or peer.is_loopback
 
 
 def _parse_zigbee_lights(value: Any) -> list[ZigbeeLightRef] | None:

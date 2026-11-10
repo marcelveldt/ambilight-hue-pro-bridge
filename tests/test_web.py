@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import TYPE_CHECKING
 
 import pytest
@@ -21,6 +22,8 @@ from ambilight_hue_bridge.config.models import (
     ZigbeeLightRef,
 )
 from ambilight_hue_bridge.config.store import ConfigStore
+from ambilight_hue_bridge.emulator.pairing import PairingManager
+from ambilight_hue_bridge.emulator.rest_v1 import HueV1Emulator
 from ambilight_hue_bridge.outbound.controller import (
     lights_from_area,
     lights_from_zigbee,
@@ -32,6 +35,8 @@ from ambilight_hue_bridge.web.server import WebServer
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
+
+    from aiohttp.typedefs import Handler
 
 
 class _FakePolicyEngine:
@@ -403,6 +408,126 @@ async def test_index_rewrites_base_for_ingress(aiohttp_client, web_setup) -> Non
     body = await resp.text()
     assert '<base href="/api/hassio_ingress/abc123/" />' in body
     assert '<base href="/" />' not in body
+
+
+_LAN_PEER = "192.0.2.10"
+_SUPERVISOR_PEER = "172.30.32.2"
+
+
+@web.middleware
+async def _peer_from_header(request: web.Request, handler: Handler) -> web.StreamResponse:
+    """Use the ``X-Peer`` header as the client address, so a test can call from any host."""
+    peer = request.headers.get("X-Peer")
+    return await handler(request.clone(remote=peer) if peer else request)
+
+
+def _service_app(
+    store: ConfigStore, home_assistant: _FakeHomeAssistant | None = None
+) -> tuple[web.Application, WebServer]:
+    """Build the service's app: the TV-facing Hue v1 API and the web UI on one app."""
+    app = web.Application(middlewares=[_peer_from_header])
+    HueV1Emulator(
+        store=store,
+        pairing=PairingManager(store),
+        host_ip="1.2.3.4",
+        mac="aabbccddeeff",
+        http_port=80,
+    ).register(app)
+    server = WebServer(
+        store=store,
+        engine=None,
+        mac="aabbccddeeff",
+        host_ip="1.2.3.4",
+        http_port=80,
+        home_assistant=home_assistant,  # type: ignore[arg-type]
+    )
+    server.register(app)
+    return app, server
+
+
+async def test_addon_serves_ui_only_to_home_assistant(
+    aiohttp_client, web_setup, monkeypatch
+) -> None:
+    """As an add-on the UI and /cfg answer the Supervisor's ingress and this host, not the LAN."""
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "supervisor-token")
+    _app, store = web_setup
+    app, _server = _service_app(store)
+    client = await aiohttp_client(app)
+    lan = {"X-Peer": _LAN_PEER}
+
+    resp = await client.get("/", headers=lan)
+    assert resp.status == 403
+    assert "Home Assistant sidebar" in await resp.text()
+    assert (await client.head("/cfg/status", headers=lan)).status == 403
+    resp = await client.put(
+        "/cfg/homeassistant", json={"url": "http://192.0.2.99", "token": "x"}, headers=lan
+    )
+    assert resp.status == 403
+    assert store.config.home_assistant.url == ""
+
+    ingress = {"X-Peer": _SUPERVISOR_PEER, "X-Ingress-Path": "/api/hassio_ingress/abc123"}
+    resp = await client.get("/", headers=ingress)
+    assert resp.status == 200
+    assert '<base href="/api/hassio_ingress/abc123/" />' in await resp.text()
+    assert (await client.get("/cfg/status", headers=ingress)).status == 200
+    # Home Assistant itself (on the host network) calls from loopback, e.g. a REST command.
+    assert (await client.get("/cfg/tvs")).status == 200
+
+
+async def test_addon_blocks_every_ui_route_from_the_lan(
+    aiohttp_client, web_setup, monkeypatch
+) -> None:
+    """As an add-on every web UI route, whatever its method, answers a LAN client with a 403."""
+
+    async def no_discovery() -> list[DiscoveredBridge]:
+        return []
+
+    # Keeps a request that wrongly reaches a handler off the network.
+    monkeypatch.setattr("ambilight_hue_bridge.web.server.discover_bridges", no_discovery)
+    home_assistant = _FakeHomeAssistant()
+    home_assistant.is_addon = True
+    _app, store = web_setup
+    app, server = _service_app(store, home_assistant)
+    client = await aiohttp_client(app)
+    routes = [route for route in app.router.routes() if route.resource in server._resources]
+    assert len(routes) > 15
+
+    served = []
+    for route in routes:
+        assert route.resource is not None
+        path = re.sub(r"\{\w+\}", "x", route.resource.canonical)
+        resp = await client.request(route.method, path, headers={"X-Peer": _LAN_PEER})
+        if resp.status != 403:
+            served.append(f"{route.method} {path} -> {resp.status}")
+    assert not served
+
+
+async def test_addon_keeps_the_hue_api_on_the_lan(aiohttp_client, web_setup, monkeypatch) -> None:
+    """As an add-on the TVs still pair and discover the bridge from the LAN."""
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "supervisor-token")
+    _app, store = web_setup
+    app, _server = _service_app(store)
+    client = await aiohttp_client(app)
+    lan = {"X-Peer": _LAN_PEER}
+
+    assert (await client.get("/description.xml", headers=lan)).status == 200
+    assert (await client.get("/api/config", headers=lan)).status == 200
+    assert (await client.get("/api/nupnp", headers=lan)).status == 200
+    resp = await client.post("/api", json={"devicetype": "tv#ambilight"}, headers=lan)
+    username = (await resp.json())[0]["success"]["username"]
+    assert (await client.get(f"/api/{username}/lights", headers=lan)).status == 200
+
+
+async def test_standalone_serves_ui_to_the_lan(aiohttp_client, web_setup, monkeypatch) -> None:
+    """Outside the add-on (no ingress) the UI and /cfg stay reachable from the LAN."""
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+    _app, store = web_setup
+    app, _server = _service_app(store)
+    client = await aiohttp_client(app)
+    lan = {"X-Peer": _LAN_PEER}
+
+    assert (await client.get("/", headers=lan)).status == 200
+    assert (await client.get("/cfg/status", headers=lan)).status == 200
 
 
 async def test_pair_adds_and_activates_bridge(aiohttp_client, web_setup, monkeypatch) -> None:
