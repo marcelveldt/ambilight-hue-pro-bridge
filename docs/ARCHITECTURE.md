@@ -140,7 +140,7 @@ The streaming client already exists, battle-tested, in **Music Assistant**:
 [music-assistant/hue-entertainment](https://github.com/music-assistant/hue-entertainment)
 package (deps `aiohttp` + `cryptography`), consumed here as a runtime dependency
 (`pyproject.toml`). `EntertainmentSession`, `HueEntertainmentAPI`, `EntertainmentArea`, and
-`discover_bridges` are imported from it (`outbound/controller.py`, `engine/engine.py`,
+`discover_bridges` are imported from it (`outbound/controller.py`, `outbound/backend.py`,
 `web/server.py`) — there is **no in-repo `hue_entertainment` module**. It ships the
 `EntertainmentSession` lifecycle wrapper (open-on-demand, idle-close, single-active-stream
 guard). Pro needs no special handling — same CLIP v2 + DTLS.
@@ -190,6 +190,7 @@ ambilight_hue_bridge/
 │   ├── ingest.py           # latest-state-wins color buffer; one slot per virtual light
 │   └── mapping.py          # virtual light → real entertainment channel commands
 ├── outbound/
+│   ├── backend.py          # output backends the engine streams through (real Hue bridge)
 │   └── controller.py       # pair/list-areas on the real bridge; per-TV light/area resolution
 └── web/
     ├── server.py           # JSON config API (/cfg/*) for the SPA

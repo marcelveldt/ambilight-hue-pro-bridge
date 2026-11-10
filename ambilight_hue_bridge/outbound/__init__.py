@@ -1,1 +1,1 @@
-"""Outbound setup helpers for pairing and inspecting real Hue bridges."""
+"""Outbound side: real Hue bridge setup helpers and the stream backends the engine uses."""
