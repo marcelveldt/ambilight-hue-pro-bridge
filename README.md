@@ -160,8 +160,8 @@ Add this repository to **Settings → Add-ons → Add-on Store → ⋮ → Repos
 https://github.com/marcelveldt/ambilight-hue-pro-bridge
 ```
 
-Then install **Ambilight+Hue Pro Bridge** and open its web UI — from the HA sidebar (ingress) or
-directly at `http://<ha-host>:80`. See [addon/README.md](addon/README.md) for details.
+Then install **Ambilight+Hue Pro Bridge** and open its web UI from the HA sidebar (ingress). See
+[addon/README.md](addon/README.md) for details.
 
 ### Per-TV control from Home Assistant
 
@@ -173,7 +173,7 @@ opening the new TV's area. A disabled TV
 stays connected to the virtual bridge but cannot stream to the real bridge; enabling it starts its
 pending request unless a higher-priority TV is active on its output.
 
-The same settings have a LAN-local JSON API for a Home Assistant REST command or REST sensor:
+The same settings have a JSON API for a Home Assistant REST command or REST sensor:
 
 ```bash
 # Find each paired TV's username and current settings.
@@ -188,8 +188,11 @@ curl -X PUT http://<bridge-host>:80/cfg/tvs/<username> \
   -d '{"enabled": false, "stream_priority": 25}'
 ```
 
-The response is the updated TV object. The direct `/cfg` API has no separate authentication, like
-the web UI itself, so expose it only on the trusted LAN or through authenticated HA ingress.
+The response is the updated TV object. As a Home Assistant add-on, the web UI and `/cfg` API
+answer only the Home Assistant sidebar and the Home Assistant host itself: use `127.0.0.1` or
+`localhost` as `<bridge-host>` in a REST command or sensor (Home Assistant shares the host's
+network). Calls through the host's LAN address or from other devices get a 403. Run standalone, they have no
+authentication, so expose them only on a trusted LAN.
 
 ### Docker
 

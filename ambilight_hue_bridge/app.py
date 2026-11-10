@@ -76,7 +76,7 @@ async def _supervisor_ingress_port() -> int | None:
 
     None when not running as an add-on (no ``SUPERVISOR_TOKEN``), when ingress is disabled, or
     when the Supervisor API can't be reached - the service then simply runs without the sidebar
-    UI (the web UI is still served on the HTTP port).
+    UI.
     """
     token = os.environ.get("SUPERVISOR_TOKEN")
     if not token:

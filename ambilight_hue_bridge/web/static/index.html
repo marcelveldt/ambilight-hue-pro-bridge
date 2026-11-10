@@ -130,14 +130,15 @@ function renderBridge(b) {
   card.className = "card";
   const badges = (b.paired ? '<span class="badge on">paired</span> ' : "")
     + (b.active ? '<span class="badge active">active</span>' : "");
-  card.innerHTML = `<div class="row"><strong>${b.host}</strong> <span class="muted">${b.model}</span>`
+  card.innerHTML = `<div class="row"><strong>${esc(b.host)}</strong>`
+    + ` <span class="muted">${esc(b.model)}</span>`
     + `<span class="spacer"></span>${badges}<button data-del>Remove</button></div>`
     + `<span class="error" data-err></span>`;
   const err = card.querySelector("[data-err]");
   card.querySelector("[data-del]").onclick = async () => {
     err.textContent = "";
     try {
-      await api(`cfg/bridges/${b.id}`, { method: "DELETE" });
+      await api(`cfg/bridges/${encodeURIComponent(b.id)}`, { method: "DELETE" });
       await refresh();
     } catch (e) { err.textContent = String(e.message || e); }
   };
@@ -187,7 +188,7 @@ async function discover() {
       out.appendChild(chip);
     }
   } catch (e) {
-    out.innerHTML = `<span class="error">${e.message || e}</span>`;
+    out.innerHTML = `<span class="error">${esc(e.message || e)}</span>`;
   } finally {
     btn.disabled = false;
   }
@@ -254,7 +255,7 @@ function renderZigbeeLamps(tv) {
     return `<label class="badge"><input type="checkbox" data-lamp="${esc(lamp.ieee)}"`
       + `${checked ? " checked" : ""}${!checked && full ? " disabled" : ""}/> ${esc(lamp.name)}`
       + (lamp.area ? ` <span class="muted">${esc(lamp.area)}</span>` : "")
-      + (zoneCount > 1 ? ` <span class="muted">${zoneCount} zones</span>` : "")
+      + (zoneCount > 1 ? ` <span class="muted">${esc(zoneCount)} zones</span>` : "")
       + (lamp.missing ? ' <span class="error">not found in ZHA</span>' : "")
       + `</label>`;
   }).join("");
@@ -301,8 +302,8 @@ function renderTv(tv, areas) {
       : '<span class="badge">disabled</span>';
   const opts = ['<option value="">— not assigned (no lights) —</option>'].concat(
     areas.map((a) =>
-      `<option value="${a.id}"${a.id === tv.entertainment_area ? " selected" : ""}>`
-      + `${a.name} (${a.channels} lights)</option>`),
+      `<option value="${esc(a.id)}"${a.id === tv.entertainment_area ? " selected" : ""}>`
+      + `${esc(a.name)} (${esc(a.channels)} lights)</option>`),
   ).join("");
   const isZigbee = tv.target === "zigbee";
   const targetRow = zigbee.available || isZigbee
@@ -322,8 +323,8 @@ function renderTv(tv, areas) {
       : "— none yet; pick an area above to give this TV its lights";
   const smooth = Number(tv.stream_smoothing ?? 0);
   card.innerHTML =
-    `<div class="row"><strong>${tv.devicetype || "TV"}</strong>`
-    + `<span class="muted">${tv.created ? "paired " + tv.created : ""}</span>`
+    `<div class="row"><strong>${esc(tv.devicetype || "TV")}</strong>`
+    + `<span class="muted">${tv.created ? "paired " + esc(tv.created) : ""}</span>`
     + `<span class="spacer"></span>${badge}<button data-del>Remove</button></div>`
     + `<div class="row" style="margin-top:.6rem">`
     + `<label class="badge"><input type="checkbox" data-enabled${tv.enabled ? " checked" : ""}/>`
