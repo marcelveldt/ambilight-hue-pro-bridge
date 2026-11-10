@@ -12,6 +12,7 @@ from ambilight_hue_bridge.config.store import ConfigStore
 from ambilight_hue_bridge.engine.engine import Engine
 from ambilight_hue_bridge.engine.ingest import ColorBuffer
 from ambilight_hue_bridge.engine.mapping import map_to_commands
+from ambilight_hue_bridge.outbound.backend import HueBridgeBackend
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -124,6 +125,12 @@ def _add_tv(
     return user
 
 
+def _captured_rid(engine: Engine) -> str:
+    """Return the streamer rid the active Hue bridge backend captured ('' when none)."""
+    backend = engine._backend
+    return backend._our_streamer_rid if isinstance(backend, HueBridgeBackend) else ""
+
+
 async def _wait_until(predicate: Callable[[], bool], max_wait: float = 2.0) -> bool:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + max_wait
@@ -143,7 +150,7 @@ async def test_engine_streams_on_submit(tmp_path: Path, monkeypatch) -> None:
         created.append(session)
         return session
 
-    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", factory)
     monkeypatch.setattr("ambilight_hue_bridge.engine.engine.IDLE_TIMEOUT_S", 0.3)
 
     engine = Engine(_configured_store(tmp_path), rate_hz=100)
@@ -243,7 +250,7 @@ async def test_identify_opens_a_stream(tmp_path: Path, monkeypatch) -> None:
         created.append(session)
         return session
 
-    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", factory)
     engine = Engine(_configured_store(tmp_path))
     engine.identify("tv1", "1")
     assert "1" in engine._identify["tv1"]
@@ -314,7 +321,7 @@ async def test_stop_during_startup_discards_the_stream(tmp_path: Path, monkeypat
     def factory(*args: object, **kwargs: object) -> _SlowSession:
         return _SlowSession(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", factory)
     engine = Engine(_configured_store(tmp_path))
     engine.start_stream("tv1")
     await asyncio.sleep(0.02)  # let _start_stream block in session.start
@@ -334,7 +341,7 @@ async def test_start_stream_sets_owner_then_clears_on_stop(tmp_path: Path, monke
         created.append(session)
         return session
 
-    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", factory)
     engine = Engine(_configured_store(tmp_path))
     engine.start_stream("tv1")
     assert await _wait_until(lambda: engine.is_streaming)
@@ -355,7 +362,7 @@ async def test_higher_priority_tv_preempts_active_stream(tmp_path: Path, monkeyp
         created.append(session)
         return session
 
-    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", factory)
     engine = Engine(store)
     assert engine.start_stream("tv1")
     assert await _wait_until(lambda: engine.is_streaming and engine.stream_owner == "tv1")
@@ -382,7 +389,7 @@ async def test_equal_priority_tv_does_not_preempt_current_owner(
         created.append(session)
         return session
 
-    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", factory)
     engine = Engine(store)
     assert engine.start_stream("tv1")
     assert await _wait_until(lambda: engine.is_streaming)
@@ -405,7 +412,7 @@ async def test_enabling_pending_tv_starts_its_stream(tmp_path: Path, monkeypatch
         created.append(session)
         return session
 
-    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", factory)
     engine = Engine(store)
     assert engine.start_stream("tv1")
     await asyncio.sleep(0.05)
@@ -430,7 +437,7 @@ async def test_disabling_owner_hands_stream_to_pending_tv(tmp_path: Path, monkey
         created.append(session)
         return session
 
-    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", factory)
     engine = Engine(store)
     assert engine.start_stream("tv1")
     assert await _wait_until(lambda: engine.is_streaming and engine.stream_owner == "tv1")
@@ -459,7 +466,7 @@ async def test_enabling_lower_priority_tv_does_not_preempt(tmp_path: Path, monke
         created.append(session)
         return session
 
-    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", factory)
     engine = Engine(store)
     assert engine.start_stream("tv1")
     assert await _wait_until(lambda: engine.is_streaming)
@@ -482,7 +489,7 @@ async def test_health_recovers_on_silent_bridge_drop(tmp_path: Path, monkeypatch
         created.append(session)
         return session
 
-    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", factory)
     monkeypatch.setattr("ambilight_hue_bridge.engine.engine._HEALTH_POLL_S", 0.02)
 
     engine = Engine(_configured_store(tmp_path), rate_hz=100)
@@ -505,14 +512,14 @@ async def test_health_backs_off_on_takeover(tmp_path: Path, monkeypatch) -> None
         created.append(session)
         return session
 
-    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", factory)
     monkeypatch.setattr("ambilight_hue_bridge.engine.engine._HEALTH_POLL_S", 0.02)
 
     engine = Engine(_configured_store(tmp_path), rate_hz=100)
     engine.submit_color("tv1", "1", (65535, 0, 0))
     assert await _wait_until(lambda: engine.is_streaming)
     # Let the first poll capture our own streamer id before a different controller appears.
-    assert await _wait_until(lambda: engine._our_streamer_rid == "us")
+    assert await _wait_until(lambda: _captured_rid(engine) == "us")
     created[0].status = ("active", "other-app")
     assert await _wait_until(lambda: not engine.is_streaming)
     assert engine._regrab_block_until > time.monotonic()
@@ -531,13 +538,13 @@ async def test_health_recovers_when_streamer_cleared(tmp_path: Path, monkeypatch
         created.append(session)
         return session
 
-    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", factory)
     monkeypatch.setattr("ambilight_hue_bridge.engine.engine._HEALTH_POLL_S", 0.02)
 
     engine = Engine(_configured_store(tmp_path), rate_hz=100)
     engine.submit_color("tv1", "1", (65535, 0, 0))
     assert await _wait_until(lambda: engine.is_streaming)
-    assert await _wait_until(lambda: engine._our_streamer_rid == "us")
+    assert await _wait_until(lambda: _captured_rid(engine) == "us")
     # Bridge keeps the config active but no longer names a streamer: our stream was dropped.
     created[0].status = ("active", "")
     assert await _wait_until(lambda: not engine.is_streaming)
@@ -565,7 +572,7 @@ async def test_stop_during_cancellable_connect_closes_session(tmp_path: Path, mo
     def factory(*args: object, **kwargs: object) -> _PropagatingSession:
         return _PropagatingSession(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr("ambilight_hue_bridge.engine.engine.EntertainmentSession", factory)
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", factory)
     engine = Engine(_configured_store(tmp_path))
     engine.start_stream("tv1")
     await asyncio.sleep(0.02)  # let _start_stream block in session.start
