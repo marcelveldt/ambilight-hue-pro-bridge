@@ -240,6 +240,7 @@ async function saveHomeAssistant() {
 
 function renderZigbeeLamps(tv) {
   const selected = tv.zigbee_lights.map((lamp) => lamp.ieee);
+  const zones = new Map(tv.zigbee_lights.map((lamp) => [lamp.ieee, lamp.zones]));
   const known = new Set(zigbee.lights.map((lamp) => lamp.ieee));
   // Selected lamps that ZHA no longer lists stay visible so they can be unticked.
   const lamps = zigbee.lights.concat(
@@ -249,16 +250,20 @@ function renderZigbeeLamps(tv) {
   const full = selected.length >= MAX_ZIGBEE_LIGHTS;
   const items = lamps.map((lamp) => {
     const checked = selected.includes(lamp.ieee);
+    const zoneCount = zones.get(lamp.ieee) || 1;
     return `<label class="badge"><input type="checkbox" data-lamp="${esc(lamp.ieee)}"`
       + `${checked ? " checked" : ""}${!checked && full ? " disabled" : ""}/> ${esc(lamp.name)}`
       + (lamp.area ? ` <span class="muted">${esc(lamp.area)}</span>` : "")
+      + (zoneCount > 1 ? ` <span class="muted">${zoneCount} zones</span>` : "")
       + (lamp.missing ? ' <span class="error">not found in ZHA</span>' : "")
       + `</label>`;
   }).join("");
   const reason = zigbee.available ? "" : `<span class="error">${esc(zigbee.reason)}</span>`;
   return `<div class="row" style="margin-top:.6rem"><span class="muted">Lamps `
     + `(up to ${MAX_ZIGBEE_LIGHTS})</span>${items || (zigbee.available ? '<span class="muted">'
-    + "No Hue colour lamps found in ZHA.</span>" : "")}${reason}</div>`;
+    + "No Hue colour lamps found in ZHA.</span>" : "")}${reason}</div>`
+    + `<div class="row"><label class="badge"><input type="checkbox" data-split`
+    + `${tv.split_gradients ? " checked" : ""}/> split gradient zones</label></div>`;
 }
 
 async function loadTvs() {
@@ -343,7 +348,9 @@ function renderTv(tv, areas) {
   const save = async () => {
     err.textContent = "";
     try {
-      await put({ entertainment_area: sel.value, split_gradients: split.checked });
+      const body = { split_gradients: split.checked };
+      if (sel) body.entertainment_area = sel.value;
+      await put(body);
       await loadTvs();
     } catch (e) { err.textContent = String(e.message || e); }
   };

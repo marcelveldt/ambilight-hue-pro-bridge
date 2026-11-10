@@ -895,7 +895,7 @@ def _zigbee_store(tmp_path: Path) -> ConfigStore:
             created="2026-11-10",
             target=StreamTarget.ZIGBEE,
             zigbee_lights=lamps,
-            lights=lights_from_zigbee(lamps),
+            lights=lights_from_zigbee(lamps, split_gradients=True),
         ),
     ]
     return store
@@ -959,6 +959,12 @@ def test_create_backend_follows_the_tv_target(tmp_path: Path, monkeypatch) -> No
     assert isinstance(created[0], ZigbeeBackend)
     assert created[1] == "1 Zigbee lamp(s), slow"
     assert created[0]._max_rate_hz == 5.0
+    assert created[0]._split_gradients is True
+    user.split_gradients = False
+    created = engine._create_backend(user)
+    assert created is not None
+    assert isinstance(created[0], ZigbeeBackend)
+    assert created[0]._split_gradients is False
     engine._fast_tvs.add(user.username)  # the TV streams entertainment (start_stream)
     created = engine._create_backend(user)
     assert created is not None
@@ -985,7 +991,7 @@ def _add_zigbee_tv(
         stream_priority=priority,
         target=StreamTarget.ZIGBEE,
         zigbee_lights=lamps,
-        lights=lights_from_zigbee(lamps),
+        lights=lights_from_zigbee(lamps, split_gradients=True),
     )
     store.config.users.append(user)
     return user
@@ -1143,7 +1149,7 @@ async def test_zigbee_tvs_linked_by_a_new_shared_lamp_arbitrate(
 
     # As the web UI does: update the lamps, then restart the TV and re-evaluate ownership.
     winner.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_A), ZigbeeLightRef(ieee=_LAMP_B)]
-    winner.lights = lights_from_zigbee(winner.zigbee_lights)
+    winner.lights = lights_from_zigbee(winner.zigbee_lights, split_gradients=True)
     await engine.restart_stream("tva")
     engine.tv_settings_changed("tva")
     assert await _wait_until(lambda: len(backends["tva"]) == 2 and backends["tva"][1].streaming)
@@ -1211,7 +1217,7 @@ def _switch_to_zigbee(user: PairedUser, ieees: list[str]) -> None:
     """Point a TV at Zigbee lamps, as the web UI does before restarting its stream."""
     user.target = StreamTarget.ZIGBEE
     user.zigbee_lights = [ZigbeeLightRef(ieee=ieee) for ieee in ieees]
-    user.lights = lights_from_zigbee(user.zigbee_lights)
+    user.lights = lights_from_zigbee(user.zigbee_lights, split_gradients=True)
 
 
 async def test_target_switch_moves_the_stream_to_the_new_output(
@@ -1347,7 +1353,7 @@ async def test_split_group_waits_for_the_shared_lamp_restore(tmp_path: Path, mon
     engine.start_stream("tv2")  # fast, waits: tv1 wins their shared output
     assert await _wait_until(lambda: engine.is_streaming)
     first.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_A)]
-    first.lights = lights_from_zigbee(first.zigbee_lights)
+    first.lights = lights_from_zigbee(first.zigbee_lights, split_gradients=True)
     await engine.restart_stream("tv1")
     engine.tv_settings_changed("tv1")
     await _pump(engine, ["tv1", "tv2"])
@@ -1370,7 +1376,7 @@ async def test_merged_outputs_wait_for_the_other_stream_to_close(
     assert engine.start_stream("tva")  # fast
     assert await _wait_until(lambda: len(made) == 2 and all(backend.streaming for backend in made))
     winner.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_A), ZigbeeLightRef(ieee=_LAMP_B)]
-    winner.lights = lights_from_zigbee(winner.zigbee_lights)
+    winner.lights = lights_from_zigbee(winner.zigbee_lights, split_gradients=True)
     await engine.restart_stream("tva")
     engine.tv_settings_changed("tva")
     await _pump(engine, ["tva", "tvb"])
@@ -1393,7 +1399,7 @@ async def test_merge_winner_from_another_output_resumes_without_a_frame(
     engine.submit_color("tva", "1", _RED)  # slow
     assert await _wait_until(lambda: len(made) == 2 and all(backend.streaming for backend in made))
     loser.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_A), ZigbeeLightRef(ieee=_LAMP_B)]
-    loser.lights = lights_from_zigbee(loser.zigbee_lights)
+    loser.lights = lights_from_zigbee(loser.zigbee_lights, split_gradients=True)
     await engine.restart_stream("tva")
     engine.tv_settings_changed("tva")
     assert await _wait_until(
@@ -1413,7 +1419,7 @@ async def test_linking_an_idle_tv_keeps_the_live_stream(tmp_path: Path, monkeypa
     engine.submit_color("tvz", "1", _RED)
     assert await _wait_until(lambda: engine.is_streaming)
     idle.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_A)]
-    idle.lights = lights_from_zigbee(idle.zigbee_lights)
+    idle.lights = lights_from_zigbee(idle.zigbee_lights, split_gradients=True)
     await engine.restart_stream("tv1")
     engine.tv_settings_changed("tv1")
     await _pump(engine, ["tvz"], 20)
@@ -1435,7 +1441,7 @@ async def test_unlinking_an_idle_tv_frees_the_waiting_tv(tmp_path: Path, monkeyp
     engine.submit_color("tv3", "1", _RED)  # slow, waits: tv2 wins their shared output
     assert await _wait_until(lambda: engine.stream_owners == {"tv2"} and engine.is_streaming)
     linker.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_C)]
-    linker.lights = lights_from_zigbee(linker.zigbee_lights)
+    linker.lights = lights_from_zigbee(linker.zigbee_lights, split_gradients=True)
     engine.tv_settings_changed("tv1")
     assert await _wait_until(lambda: engine.stream_owners == {"tv2", "tv3"})
     assert len(made) == 2
@@ -1526,7 +1532,9 @@ async def test_tv_that_starts_streaming_moves_to_the_fast_rate(tmp_path: Path, m
     rates: list[float] = []
 
     class _RateBackend(_CountingBackend):
-        def __init__(self, _ha: object, _lamps: object, *, max_rate_hz: float) -> None:
+        def __init__(
+            self, _ha: object, _lamps: object, *, max_rate_hz: float, **_options: object
+        ) -> None:
             super().__init__()
             rates.append(max_rate_hz)
 
@@ -1556,7 +1564,7 @@ async def test_tv_split_off_a_streaming_group_gets_its_own_output(
     assert engine.start_stream("tvb")  # fast, streams on the tva+tvb output
     assert await _wait_until(lambda: engine.stream_owners == {"tvb"} and engine.is_streaming)
     tva.zigbee_lights = [ZigbeeLightRef(ieee=_LAMP_A)]
-    tva.lights = lights_from_zigbee(tva.zigbee_lights)
+    tva.lights = lights_from_zigbee(tva.zigbee_lights, split_gradients=True)
     await engine.restart_stream("tva")
     engine.tv_settings_changed("tva")
     await _pump(engine, ["tvb", "tva"], 40)  # tva only pushes REST colors: slow

@@ -87,7 +87,10 @@ def test_zigbee_target_roundtrip(tmp_path: Path) -> None:
             devicetype="TV",
             created="2026-11-10",
             target=StreamTarget.ZIGBEE,
-            zigbee_lights=[ZigbeeLightRef(ieee="00:17:88:01:00:00:00:01", name="Couch")],
+            zigbee_lights=[
+                ZigbeeLightRef(ieee="00:17:88:01:00:00:00:01", name="Couch"),
+                ZigbeeLightRef(ieee="00:17:88:01:00:00:00:02", name="Signe", segments=7),
+            ],
         ),
     )
     store.config.home_assistant.url = "http://homeassistant.local:8123"
@@ -98,7 +101,8 @@ def test_zigbee_target_roundtrip(tmp_path: Path) -> None:
     config = ConfigStore(path).load()
     assert config.users[0].target is StreamTarget.ZIGBEE
     assert config.users[0].zigbee_lights == [
-        ZigbeeLightRef(ieee="00:17:88:01:00:00:00:01", name="Couch")
+        ZigbeeLightRef(ieee="00:17:88:01:00:00:00:01", name="Couch"),
+        ZigbeeLightRef(ieee="00:17:88:01:00:00:00:02", name="Signe", segments=7),
     ]
     assert config.home_assistant.url == "http://homeassistant.local:8123"
     assert config.home_assistant.token == "token"
@@ -123,3 +127,26 @@ users:
     assert config.users[0].zigbee_lights == []
     assert config.home_assistant.url == ""
     assert config.home_assistant.token == ""
+
+
+def test_zigbee_lamp_from_before_gradient_zones_loads_as_one_segment(tmp_path: Path) -> None:
+    """A lamp saved without a segment count loads as a lamp without segments."""
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+users:
+  - username: u1
+    clientkey: k
+    devicetype: TV
+    created: "2026-11-10"
+    target: zigbee
+    zigbee_lights:
+      - ieee: "00:17:88:01:00:00:00:01"
+        name: Signe
+""".lstrip(),
+        encoding="utf-8",
+    )
+    config = ConfigStore(path).load()
+    assert config.users[0].zigbee_lights == [
+        ZigbeeLightRef(ieee="00:17:88:01:00:00:00:01", name="Signe", segments=1)
+    ]

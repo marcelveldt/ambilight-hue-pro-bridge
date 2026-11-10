@@ -581,7 +581,10 @@ class Engine:
             lamps = user.zigbee_lights
             zigbee_class = self._zigbee_class(user.username)
             backend = ZigbeeBackend(
-                self._home_assistant, lamps, max_rate_hz=_ZIGBEE_RATE_HZ[zigbee_class]
+                self._home_assistant,
+                lamps,
+                split_gradients=user.split_gradients,
+                max_rate_hz=_ZIGBEE_RATE_HZ[zigbee_class],
             )
             return backend, f"{len(lamps)} Zigbee lamp(s), {zigbee_class}"
         bridge = active_bridge(self._store)
