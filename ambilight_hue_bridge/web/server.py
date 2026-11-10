@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 from aiohttp import web
 from hue_entertainment import discover_bridges
+from hue_entertainment.zigbee import ZigguratError, read_segment_counts
 
 from ambilight_hue_bridge.config.models import (
     CachedArea,
@@ -25,6 +26,7 @@ from ambilight_hue_bridge.outbound.controller import (
     lights_from_zigbee,
     list_areas,
     pair_and_store,
+    zigbee_channels,
 )
 from ambilight_hue_bridge.outbound.homeassistant import HomeAssistantClient, HomeAssistantError
 
@@ -73,6 +75,7 @@ class WebServer:
             home_assistant if home_assistant is not None else HomeAssistantClient(store)
         )
         self._mac = mac
+        self._lamps_lock = asyncio.Lock()
         self._host_ip = host_ip
         self._http_port = http_port
         # Cached once so the index handler can inject the ingress <base> per request without
@@ -201,7 +204,7 @@ class WebServer:
             user.target = target_update
             rebuild = True
         if lamps_update is not None:
-            user.zigbee_lights = lamps_update
+            await self._assign_lamps(user, lamps_update)
             rebuild = True
         if "entertainment_area" in body:
             user.entertainment_area = str(body["entertainment_area"])
@@ -384,7 +387,10 @@ class WebServer:
             "entertainment_area": user.entertainment_area,
             "split_gradients": user.split_gradients,
             "zigbee_lights": [
-                {"ieee": lamp.ieee, "name": lamp.name} for lamp in user.zigbee_lights
+                {"ieee": lamp.ieee, "name": lamp.name, "zones": len(channels)}
+                for lamp, channels in zigbee_channels(
+                    user.zigbee_lights, split_gradients=user.split_gradients
+                )
             ],
             "stream_smoothing": user.stream_smoothing if user.stream_smoothing is not None else 0.0,
             "lights": [light.name for light in user.lights],
@@ -402,7 +408,9 @@ class WebServer:
     async def _rebuild_lights(self, user: PairedUser) -> None:
         """Rebuild the virtual lights a TV sees from its selected lamps or assigned area."""
         if user.target is StreamTarget.ZIGBEE:
-            user.lights = lights_from_zigbee(user.zigbee_lights)
+            user.lights = lights_from_zigbee(
+                user.zigbee_lights, split_gradients=user.split_gradients
+            )
         elif user.entertainment_area:
             area = await self._area_by_id(user.entertainment_area)
             user.lights = (
@@ -410,6 +418,62 @@ class WebServer:
             )
         else:
             user.lights = []
+
+    async def _assign_lamps(self, user: PairedUser, lamps: list[ZigbeeLightRef]) -> None:
+        """
+        Give a TV a new lamp selection, reading the gradient segments of newly added lamps.
+
+        :param user: The TV.
+        :param lamps: Its new lamp selection.
+        """
+        # Reading new lamps waits on the network; a quick follow-up edit must not be overtaken
+        # by an earlier one.
+        async with self._lamps_lock:
+            await self._set_lamp_segments(lamps, user.zigbee_lights)
+            user.zigbee_lights = lamps
+
+    async def _set_lamp_segments(
+        self, lamps: list[ZigbeeLightRef], previous: list[ZigbeeLightRef]
+    ) -> None:
+        """
+        Set the lamps' gradient segment counts: kept for lamps in ``previous``, read for new ones.
+
+        A new lamp whose count cannot be read keeps 1 segment; re-adding it reads it again.
+
+        :param lamps: A TV's new lamp selection.
+        :param previous: The TV's lamp selection before this update.
+        """
+        stored = {lamp.ieee: lamp.segments for lamp in previous}
+        added: list[ZigbeeLightRef] = []
+        for lamp in lamps:
+            if lamp.ieee in stored:
+                lamp.segments = stored[lamp.ieee]
+            else:
+                added.append(lamp)
+        if not added:
+            return
+        try:
+            url, addresses = await self._home_assistant.stream_info()
+            nwks = {lamp.ieee: addresses[lamp.ieee] for lamp in added if lamp.ieee in addresses}
+            counts = await read_segment_counts(url, nwks.values()) if url and nwks else {}
+        except (HomeAssistantError, ZigguratError) as err:
+            LOGGER.warning(
+                "Could not read whether the new Zigbee lamps are gradients (%s); re-add them to "
+                "try again",
+                err,
+            )
+            return
+        for lamp in added:
+            nwk = nwks.get(lamp.ieee)
+            if nwk is None or nwk not in counts:
+                LOGGER.warning(
+                    "Zigbee lamp %s (%s) did not report whether it is a gradient; re-add it to "
+                    "try again",
+                    lamp.name,
+                    lamp.ieee,
+                )
+                continue
+            lamp.segments = counts[nwk]
 
     async def _area_by_id(self, area_id: str) -> Any:
         """Return the active bridge's entertainment area with the given id (live or cached)."""

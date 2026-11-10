@@ -94,7 +94,8 @@ Hue colour lamps on that Zigbee network, with no Hue bridge involved:
 
 1. In the web UI, set the TV's **Streams to** to **Zigbee lights (ZHA)**. The option appears once
    Home Assistant is reachable and ZHA runs on Ziggurat.
-2. Tick up to 10 Hue colour lamps, listed by name and area. The TV sees one light per lamp; place
+2. Tick up to 10 Hue colour lamps, listed by name and area. The TV sees one light per lamp, and
+   with **split gradient zones** three per gradient lamp (a Signe or gradient lightstrip); place
    them around the screen in the TV's Ambilight+Hue menu.
 
 As a Home Assistant add-on the connection to Home Assistant is automatic. Otherwise enter your Home

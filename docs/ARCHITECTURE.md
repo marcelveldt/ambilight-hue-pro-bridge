@@ -248,9 +248,10 @@ users:                               # paired TVs; each is assigned an area in t
         modelid: "LCX004"
         position: "left"             # informational, for the web UI
         channels: [0]                # real-bridge entertainment channel ids this light drives
-    zigbee_lights:                   # the "zigbee" target's lamps, 1-10; channel id = list index
+    zigbee_lights:                   # the "zigbee" target's lamps, 1-10, in channel order
       - ieee: "00:17:88:01:0c:bf:17:c8"  # IEEE only: the network address can change
         name: "Couch lamp"
+        segments: 1                  # gradient segments, read once when the lamp is added
 ```
 
 Notes: lights resolve **per TV** — a TV with no area (`entertainment_area: ""`) sees no lights
@@ -394,7 +395,10 @@ and each stream start):
 
 A TV stores its lamps by IEEE address; `ZigbeeBackend` resolves the current network address of
 each on every stream start and skips lamps ZHA no longer has. The TV's virtual lights are one per
-lamp, with the lamp's index as its channel id. The session captures the lamps' state on start and
+lamp, or with `split_gradients` one per zone of a gradient lamp (up to 3; its segment count is read
+once with `read_segment_counts` when the lamp is added). `zigbee_channels` numbers the channels in
+lamp order for both the virtual lights and the backend, so a skipped lamp keeps the others'
+channel ids. The session captures the lamps' state on start and
 restores it on close. A lost stream (e.g. ZHA restarting its Zigbee stack) is restarted in place
 by the health check, which keeps the captured state, for up to a minute before it counts as lost.
 A Zigbee TV is ready to stream when it has lamps and a Home Assistant connection; no Hue bridge is

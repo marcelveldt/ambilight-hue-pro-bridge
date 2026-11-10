@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import TYPE_CHECKING
 
 import pytest
 from aiohttp import web
 from hue_entertainment import DiscoveredBridge, EntertainmentArea, LightChannel
+from hue_entertainment.zigbee import ZigguratError
 
 from ambilight_hue_bridge.config.models import (
     CachedArea,
@@ -15,13 +18,19 @@ from ambilight_hue_bridge.config.models import (
     RealBridge,
     StreamTarget,
     VirtualLight,
+    ZigbeeLightRef,
 )
 from ambilight_hue_bridge.config.store import ConfigStore
-from ambilight_hue_bridge.outbound.controller import lights_from_area
+from ambilight_hue_bridge.outbound.controller import (
+    lights_from_area,
+    lights_from_zigbee,
+    zigbee_channels,
+)
 from ambilight_hue_bridge.outbound.homeassistant import HomeAssistantError, ZhaLight
 from ambilight_hue_bridge.web.server import WebServer
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from pathlib import Path
 
 
@@ -326,6 +335,53 @@ def test_mirror_merges_gradient_when_not_split() -> None:
     assert merged[0].channels == [0, 1]
 
 
+def test_zigbee_channels_split_gradient_lamps_into_zones() -> None:
+    """With split on a gradient lamp gets up to 3 consecutive channels, any other lamp one."""
+    lamps = [
+        ZigbeeLightRef(ieee="a", segments=7),
+        ZigbeeLightRef(ieee="b"),
+        ZigbeeLightRef(ieee="c", segments=2),
+    ]
+    split = zigbee_channels(lamps, split_gradients=True)
+    assert [lamp for lamp, _channels in split] == lamps
+    assert [list(channels) for _lamp, channels in split] == [[0, 1, 2], [3], [4, 5]]
+    merged = zigbee_channels(lamps, split_gradients=False)
+    assert [list(channels) for _lamp, channels in merged] == [[0], [1], [2]]
+
+
+def test_lights_from_zigbee_one_light_per_zone() -> None:
+    """Zone lights follow the lamps' channels, named after the lamp and zone within 32 chars."""
+    lamps = [
+        ZigbeeLightRef(ieee="a", name="Signe floor lamp right of the TV", segments=7),
+        ZigbeeLightRef(ieee="b", name="Signe left", segments=7),
+        ZigbeeLightRef(ieee="c", name="Spot"),
+        ZigbeeLightRef(ieee="d", segments=5),
+    ]
+    lights = lights_from_zigbee(lamps, split_gradients=True)
+    assert [(light.id, light.channels) for light in lights] == [
+        (str(channel + 1), [channel]) for channel in range(10)
+    ]
+    assert [light.name for light in lights] == [
+        "Signe floor lamp right (zone 1)",
+        "Signe floor lamp right (zone 2)",
+        "Signe floor lamp right (zone 3)",
+        "Signe left (zone 1)",
+        "Signe left (zone 2)",
+        "Signe left (zone 3)",
+        "Spot",
+        "Light 4 (zone 1)",
+        "Light 4 (zone 2)",
+        "Light 4 (zone 3)",
+    ]
+    merged = lights_from_zigbee(lamps, split_gradients=False)
+    assert [(light.id, light.name, light.channels) for light in merged] == [
+        ("1", "Signe floor lamp right of the TV", [0]),
+        ("2", "Signe left", [1]),
+        ("3", "Spot", [2]),
+        ("4", "Light 4", [3]),
+    ]
+
+
 async def test_index_is_served(aiohttp_client, web_setup) -> None:
     """The single-page UI is served at the root with a root <base> for direct access."""
     app, _store = web_setup
@@ -447,9 +503,11 @@ class _FakeHomeAssistant:
         self,
         url: str | None = "ws://core-ziggurat:9999",
         error: HomeAssistantError | None = None,
+        addresses: dict[str, int] | None = None,
     ) -> None:
         self.url = url
         self.error = error
+        self.addresses = addresses or {}
         self.is_addon = False
         self.available = error is None
 
@@ -458,12 +516,34 @@ class _FakeHomeAssistant:
             raise self.error
         return self.url
 
+    async def stream_info(self) -> tuple[str | None, dict[str, int]]:
+        if self.error is not None:
+            raise self.error
+        return self.url, self.addresses
+
     async def hue_lights(self) -> list[ZhaLight]:
         return [
             ZhaLight(
                 ieee="00:17:88:01:00:00:00:01", nwk=1, name="Couch", area="Living", model="LCT015"
             ),
         ]
+
+
+def _patch_segment_counts(
+    monkeypatch: pytest.MonkeyPatch, counts: dict[int, int] | Exception
+) -> list[list[int]]:
+    """Answer the Ziggurat segment reads from ``counts`` (or raise it); return each read's nwks."""
+    reads: list[list[int]] = []
+
+    async def fake_read(_url: str, nwks: Iterable[int]) -> dict[int, int]:
+        requested = list(nwks)
+        reads.append(requested)
+        if isinstance(counts, Exception):
+            raise counts
+        return {nwk: counts[nwk] for nwk in requested if nwk in counts}
+
+    monkeypatch.setattr("ambilight_hue_bridge.web.server.read_segment_counts", fake_read)
+    return reads
 
 
 def _zigbee_app(
@@ -541,6 +621,7 @@ async def test_assign_zigbee_target_rebuilds_lights(aiohttp_client, web_setup, m
         raise OSError("connection refused")
 
     monkeypatch.setattr("ambilight_hue_bridge.web.server.list_areas", boom)
+    _patch_segment_counts(monkeypatch, {})
     engine = _FakePolicyEngine()
     client = await aiohttp_client(_zigbee_app(store, _FakeHomeAssistant(), engine))
     lamps = [
@@ -552,8 +633,8 @@ async def test_assign_zigbee_target_rebuilds_lights(aiohttp_client, web_setup, m
     ).json()
     assert tv["target"] == "zigbee"
     assert tv["zigbee_lights"] == [
-        {"ieee": "00:17:88:01:00:00:00:0a", "name": lamps[0]["name"]},
-        {"ieee": "00:17:88:01:00:00:00:0b", "name": "Couch"},
+        {"ieee": "00:17:88:01:00:00:00:0a", "name": lamps[0]["name"], "zones": 1},
+        {"ieee": "00:17:88:01:00:00:00:0b", "name": "Couch", "zones": 1},
     ]
     assert tv["lights"] == ["A lamp with a name far beyond 32", "Couch"]
     user = store.config.users[0]
@@ -584,6 +665,135 @@ async def test_assign_zigbee_rejects_invalid_values(aiohttp_client, web_setup) -
     user = store.config.users[0]
     assert user.target is StreamTarget.HUE
     assert user.zigbee_lights == []
+
+
+_SIGNE = "00:17:88:01:00:00:00:0a"
+_SPOT = "00:17:88:01:00:00:00:0b"
+_STRIP = "00:17:88:01:00:00:00:0c"
+
+
+async def test_assign_zigbee_lamps_reads_segments_of_new_lamps_only(
+    aiohttp_client, web_setup, monkeypatch, tmp_path
+) -> None:
+    """Newly added lamps are asked for their gradient segments; selected lamps keep theirs."""
+    _app, store = web_setup
+    store.config.users = [
+        PairedUser(
+            username="u1",
+            clientkey="k",
+            devicetype="TV",
+            created="2026-11-10",
+            target=StreamTarget.ZIGBEE,
+            zigbee_lights=[ZigbeeLightRef(ieee=_SIGNE, name="Signe", segments=7)],
+        ),
+    ]
+    # The Signe would answer 1 now: only its stored count may be used.
+    reads = _patch_segment_counts(monkeypatch, {0x0A: 1, 0x0B: 1, 0x0C: 2})
+    home_assistant = _FakeHomeAssistant(addresses={_SIGNE: 0x0A, _SPOT: 0x0B, _STRIP: 0x0C})
+    client = await aiohttp_client(_zigbee_app(store, home_assistant))
+    lamps = [
+        {"ieee": _SIGNE, "name": "Signe"},
+        {"ieee": _SPOT, "name": "Spot"},
+        {"ieee": _STRIP, "name": "Strip"},
+    ]
+    tv = await (await client.put("/cfg/tvs/u1", json={"zigbee_lights": lamps})).json()
+    assert reads == [[0x0B, 0x0C]]
+    assert [lamp["zones"] for lamp in tv["zigbee_lights"]] == [3, 1, 2]
+    assert tv["lights"] == [
+        "Signe (zone 1)",
+        "Signe (zone 2)",
+        "Signe (zone 3)",
+        "Spot",
+        "Strip (zone 1)",
+        "Strip (zone 2)",
+    ]
+    saved = ConfigStore(tmp_path / "config.yaml").load().users[0].zigbee_lights
+    assert [lamp.segments for lamp in saved] == [7, 1, 2]
+
+    # Removing and reordering lamps reads nothing; splitting off keeps the stored counts.
+    tv = await (
+        await client.put("/cfg/tvs/u1", json={"zigbee_lights": [lamps[2], lamps[0]]})
+    ).json()
+    assert reads == [[0x0B, 0x0C]]
+    assert [lamp["zones"] for lamp in tv["zigbee_lights"]] == [2, 3]
+    tv = await (await client.put("/cfg/tvs/u1", json={"split_gradients": False})).json()
+    assert tv["lights"] == ["Strip", "Signe"]
+    assert [lamp["zones"] for lamp in tv["zigbee_lights"]] == [1, 1]
+    assert [lamp.segments for lamp in store.config.users[0].zigbee_lights] == [2, 7]
+
+
+async def test_assign_zigbee_lamps_in_order_while_a_read_is_slow(
+    aiohttp_client, web_setup, monkeypatch
+) -> None:
+    """A quick second lamp edit is applied after the first, not overtaken by it."""
+    _app, store = web_setup
+    store.config.users = [
+        PairedUser(
+            username="u1",
+            clientkey="k",
+            devicetype="TV",
+            created="2026-11-10",
+            target=StreamTarget.ZIGBEE,
+        ),
+    ]
+    delays = iter([0.3, 0.05])  # the first edit's read is slower than the second's
+
+    async def slow_read(_url: str, nwks: Iterable[int]) -> dict[int, int]:
+        await asyncio.sleep(next(delays))
+        return dict.fromkeys(nwks, 1)
+
+    monkeypatch.setattr("ambilight_hue_bridge.web.server.read_segment_counts", slow_read)
+    home_assistant = _FakeHomeAssistant(addresses={_SIGNE: 0x0A, _SPOT: 0x0B})
+    client = await aiohttp_client(_zigbee_app(store, home_assistant))
+    # Tick the Signe, then the spot before the first answer arrived.
+    first = asyncio.ensure_future(
+        client.put("/cfg/tvs/u1", json={"zigbee_lights": [{"ieee": _SIGNE}]})
+    )
+    await asyncio.sleep(0.01)
+    second = asyncio.ensure_future(
+        client.put("/cfg/tvs/u1", json={"zigbee_lights": [{"ieee": _SIGNE}, {"ieee": _SPOT}]})
+    )
+    await asyncio.gather(first, second)
+    assert [lamp.ieee for lamp in store.config.users[0].zigbee_lights] == [_SIGNE, _SPOT]
+
+
+@pytest.mark.parametrize(
+    ("home_assistant", "counts"),
+    [
+        pytest.param(
+            _FakeHomeAssistant(error=HomeAssistantError("Home Assistant did not respond in time")),
+            {0x0A: 7},
+            id="home-assistant-error",
+        ),
+        pytest.param(
+            _FakeHomeAssistant(addresses={_SIGNE: 0x0A}),
+            ZigguratError("Cannot connect to Ziggurat"),
+            id="ziggurat-unreachable",
+        ),
+        pytest.param(_FakeHomeAssistant(addresses={_SIGNE: 0x0A}), {}, id="no-answer"),
+        pytest.param(_FakeHomeAssistant(), {0x0A: 7}, id="not-in-zha"),
+    ],
+)
+async def test_assign_zigbee_lamp_stays_one_segment_when_reading_fails(
+    aiohttp_client, web_setup, monkeypatch, caplog, home_assistant, counts
+) -> None:
+    """A new lamp whose segments cannot be read streams as one light; the PUT still succeeds."""
+    _app, store = web_setup
+    store.config.users = [
+        PairedUser(username="u1", clientkey="k", devicetype="TV", created="2026-11-10"),
+    ]
+    _patch_segment_counts(monkeypatch, counts)
+    client = await aiohttp_client(_zigbee_app(store, home_assistant))
+    with caplog.at_level(logging.WARNING):
+        resp = await client.put(
+            "/cfg/tvs/u1",
+            json={"target": "zigbee", "zigbee_lights": [{"ieee": _SIGNE, "name": "Signe"}]},
+        )
+    assert resp.status == 200
+    tv = await resp.json()
+    assert tv["lights"] == ["Signe"]
+    assert store.config.users[0].zigbee_lights[0].segments == 1
+    assert any("re-add" in record.getMessage() for record in caplog.records)
 
 
 async def test_home_assistant_token_is_write_only(aiohttp_client, web_setup, monkeypatch) -> None:

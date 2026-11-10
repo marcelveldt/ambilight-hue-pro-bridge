@@ -17,9 +17,9 @@ dependencies = [
   "pyyaml>=6.0",
   # Outbound Hue Entertainment streaming client (DTLS/PSK + HueStream), shared with
   # Music Assistant. During local development it is installed editable from the sibling
-  # checkout (see scripts/setup.sh); CI/users get it from PyPI. >=0.3.0 for the Zigbee
-  # entertainment session (with its frame-rate cap) behind the Zigbee lights target.
-  "hue-entertainment>=0.3.0",
+  # checkout (see scripts/setup.sh); CI/users get it from PyPI. >=0.4.0 for the gradient
+  # zones of the Zigbee entertainment session behind the Zigbee lights target.
+  "hue-entertainment>=0.4.0",
   # Hue-style self-signed TLS cert for the HTTPS listener (newer TVs connect over TLS).
   "cryptography>=42",
   # mDNS/DNS-SD advertisement of _hue._tcp so newer Hue clients can also discover us.

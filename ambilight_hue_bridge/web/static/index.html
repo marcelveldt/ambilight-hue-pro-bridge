@@ -240,6 +240,7 @@ async function saveHomeAssistant() {
 
 function renderZigbeeLamps(tv) {
   const selected = tv.zigbee_lights.map((lamp) => lamp.ieee);
+  const zones = new Map(tv.zigbee_lights.map((lamp) => [lamp.ieee, lamp.zones]));
   const known = new Set(zigbee.lights.map((lamp) => lamp.ieee));
   // Selected lamps that ZHA no longer lists stay visible so they can be unticked.
   const lamps = zigbee.lights.concat(
@@ -249,24 +250,37 @@ function renderZigbeeLamps(tv) {
   const full = selected.length >= MAX_ZIGBEE_LIGHTS;
   const items = lamps.map((lamp) => {
     const checked = selected.includes(lamp.ieee);
+    const zoneCount = zones.get(lamp.ieee) || 1;
     return `<label class="badge"><input type="checkbox" data-lamp="${esc(lamp.ieee)}"`
       + `${checked ? " checked" : ""}${!checked && full ? " disabled" : ""}/> ${esc(lamp.name)}`
       + (lamp.area ? ` <span class="muted">${esc(lamp.area)}</span>` : "")
+      + (zoneCount > 1 ? ` <span class="muted">${zoneCount} zones</span>` : "")
       + (lamp.missing ? ' <span class="error">not found in ZHA</span>' : "")
       + `</label>`;
   }).join("");
   const reason = zigbee.available ? "" : `<span class="error">${esc(zigbee.reason)}</span>`;
   return `<div class="row" style="margin-top:.6rem"><span class="muted">Lamps `
     + `(up to ${MAX_ZIGBEE_LIGHTS})</span>${items || (zigbee.available ? '<span class="muted">'
-    + "No Hue colour lamps found in ZHA.</span>" : "")}${reason}</div>`;
+    + "No Hue colour lamps found in ZHA.</span>" : "")}${reason}</div>`
+    + `<div class="row"><label class="badge"><input type="checkbox" data-split`
+    + `${tv.split_gradients ? " checked" : ""}/> split gradient zones</label></div>`;
 }
 
+// TV edits in flight, and a count of all edits made, so a redraw never shows older state.
+let tvEdits = 0;
+let tvEditSeq = 0;
+
 async function loadTvs() {
+  // Redrawing from state read while an edit is pending, or before it, would reset its
+  // checkboxes, and the next tick would then send that stale selection.
+  if (tvEdits) return;
+  const seq = tvEditSeq;
   const tvs = await api("cfg/tvs");
   // Areas only fill the per-TV dropdown; if the bridge is unreachable (e.g. unplugged during
   // TV pairing) that must not hide the TV list itself.
   let areas = [];
   try { areas = await api("cfg/areas"); } catch (e) { /* show TVs without area options */ }
+  if (tvEdits || seq !== tvEditSeq) return;
   const container = document.getElementById("tvs");
   container.innerHTML = "";
   if (!tvs.length) {
@@ -335,15 +349,25 @@ function renderTv(tv, areas) {
   const smoothEl = card.querySelector("[data-smooth]");
   const smoothVal = card.querySelector("[data-smooth-val]");
   const err = card.querySelector("[data-err]");
-  const put = (body) => api(`cfg/tvs/${encodeURIComponent(tv.username)}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const put = async (body) => {
+    tvEdits += 1;
+    tvEditSeq += 1;
+    try {
+      return await api(`cfg/tvs/${encodeURIComponent(tv.username)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } finally {
+      tvEdits -= 1;
+    }
+  };
   const save = async () => {
     err.textContent = "";
     try {
-      await put({ entertainment_area: sel.value, split_gradients: split.checked });
+      const body = { split_gradients: split.checked };
+      if (sel) body.entertainment_area = sel.value;
+      await put(body);
       await loadTvs();
     } catch (e) { err.textContent = String(e.message || e); }
   };

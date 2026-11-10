@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from hue_entertainment import EntertainmentSession, ZigbeeEntertainmentSession, ZigbeeLight
 
+from .controller import zigbee_channels
 from .homeassistant import HomeAssistantError
 
 if TYPE_CHECKING:
@@ -139,17 +140,21 @@ class ZigbeeBackend:
         home_assistant: HomeAssistantClient,
         lamps: list[ZigbeeLightRef],
         *,
+        split_gradients: bool,
         max_rate_hz: float = 25.0,
     ) -> None:
         """
         Initialize the backend (no network I/O until :meth:`start`).
 
         :param home_assistant: Client resolving the Ziggurat server and the lamps' addresses.
-        :param lamps: The lamps to stream to; each lamp's index is its channel id.
+        :param lamps: The lamps to stream to, on the channels of
+            :func:`~ambilight_hue_bridge.outbound.controller.zigbee_channels`.
+        :param split_gradients: Stream each zone of a gradient lamp on its own channel.
         :param max_rate_hz: Most frames per second to send; the lamps fade in between.
         """
         self._home_assistant = home_assistant
         self._lamps = lamps
+        self._split_gradients = split_gradients
         self._max_rate_hz = max_rate_hz
         self._session: ZigbeeEntertainmentSession | None = None
         self._lost_since: float | None = None
@@ -175,14 +180,17 @@ class ZigbeeBackend:
             msg = "ZHA does not run on a Ziggurat server"
             raise HomeAssistantError(msg)
         lights: list[ZigbeeLight] = []
-        for channel_id, lamp in enumerate(self._lamps):
+        for lamp, channels in zigbee_channels(self._lamps, split_gradients=self._split_gradients):
             nwk = addresses.get(lamp.ieee.lower())
             if nwk is None:
                 LOGGER.warning(
                     "Zigbee lamp %s (%s) not found in ZHA; skipping", lamp.name, lamp.ieee
                 )
                 continue
-            lights.append(ZigbeeLight(channel_id, lamp.ieee, nwk, lamp.name))
+            lights.extend(
+                ZigbeeLight(channel_id, lamp.ieee, nwk, lamp.name, zone)
+                for zone, channel_id in enumerate(channels)
+            )
         if not lights:
             msg = "None of the selected Zigbee lamps are in ZHA"
             raise HomeAssistantError(msg)
@@ -195,7 +203,7 @@ class ZigbeeBackend:
         """
         Queue one frame of lamp colors; non-blocking.
 
-        :param commands: One color command per lamp (channel) to update this frame.
+        :param commands: One color command per channel (a lamp or a zone) to update this frame.
         """
         if self._session is not None:
             self._session.send(commands)

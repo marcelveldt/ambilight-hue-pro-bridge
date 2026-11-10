@@ -38,6 +38,8 @@ class ZigbeeLightRef:
 
     ieee: str
     name: str = ""
+    # Gradient segments the lamp reported when it was added to the TV (1 for a lamp without).
+    segments: int = 1
 
 
 @dataclass
@@ -60,8 +62,9 @@ class PairedUser:
     entertainment_area: str = ""
     split_gradients: bool = True
     lights: list[VirtualLight] = field(default_factory=list)
-    # The ZHA lamps a Zigbee-target TV streams to; the TV sees one light per lamp. Stored by IEEE
-    # address only, as the network address can change.
+    # The ZHA lamps a Zigbee-target TV streams to; the TV sees one light per lamp, or per zone of a
+    # gradient lamp with split_gradients. Stored by IEEE address only, as the network address can
+    # change.
     zigbee_lights: list[ZigbeeLightRef] = field(default_factory=list)
     # Per-TV temporal easing (None/0 => off). Fast DTLS-streaming TVs are already smooth and want
     # 0; the ~1 Hz REST TVs (older models) want easing to fill the gaps between updates.

@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 # Hue v1 light names are capped at 32 chars; longer names are rejected and some TVs then show
 # a generic "light N" instead of the real name.
 _MAX_LIGHT_NAME = 32
+# Zones a gradient lamp of a Zigbee-target TV is split into.
+_ZIGBEE_GRADIENT_ZONES = 3
 
 
 async def pair_bridge(host: str) -> dict[str, str]:
@@ -173,20 +175,47 @@ def lights_from_area(area: Any, *, split_gradients: bool = True) -> list[Virtual
     return lights
 
 
-def lights_from_zigbee(lamps: list[ZigbeeLightRef]) -> list[VirtualLight]:
+def lights_from_zigbee(lamps: list[ZigbeeLightRef], *, split_gradients: bool) -> list[VirtualLight]:
     """
-    Build the virtual lights a Zigbee-target TV sees: one per selected lamp, in order.
+    Build the virtual lights a Zigbee-target TV sees: one per lamp or gradient zone, in order.
 
-    :param lamps: The TV's selected ZHA lamps; each lamp's index is its channel id.
+    Each light drives one channel of :func:`zigbee_channels`; its id is that channel id + 1.
+
+    :param lamps: The TV's selected ZHA lamps.
+    :param split_gradients: Expose each zone of a gradient lamp as a separate light.
     """
-    return [
-        VirtualLight(
-            id=str(index + 1),
-            name=_fit_name(lamp.name or f"Light {index + 1}"),
-            channels=[index],
-        )
-        for index, lamp in enumerate(lamps)
-    ]
+    lights: list[VirtualLight] = []
+    for index, (lamp, channels) in enumerate(
+        zigbee_channels(lamps, split_gradients=split_gradients)
+    ):
+        base = lamp.name or f"Light {index + 1}"
+        for zone, channel in enumerate(channels):
+            suffix = f"zone {zone + 1}" if len(channels) > 1 else ""
+            lights.append(
+                VirtualLight(id=str(channel + 1), name=_fit_name(base, suffix), channels=[channel])
+            )
+    return lights
+
+
+def zigbee_channels(
+    lamps: list[ZigbeeLightRef], *, split_gradients: bool
+) -> list[tuple[ZigbeeLightRef, range]]:
+    """
+    Return each of a Zigbee-target TV's lamps with the channel ids it streams on, in order.
+
+    A gradient lamp gets one channel per zone (up to 3) when ``split_gradients`` is on; any other
+    lamp gets one channel. The channels are numbered consecutively from 0.
+
+    :param lamps: The TV's selected ZHA lamps.
+    :param split_gradients: Whether the TV splits gradient lamps into zones.
+    """
+    layout: list[tuple[ZigbeeLightRef, range]] = []
+    start = 0
+    for lamp in lamps:
+        zones = min(_ZIGBEE_GRADIENT_ZONES, lamp.segments) if split_gradients else 1
+        layout.append((lamp, range(start, start + zones)))
+        start += zones
+    return layout
 
 
 def _upsert_bridge(store: ConfigStore, host: str, credentials: dict[str, str]) -> RealBridge:
