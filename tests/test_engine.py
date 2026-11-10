@@ -712,6 +712,48 @@ async def test_restart_stream_reopens_the_active_stream(tmp_path: Path, monkeypa
     await engine.stop()
 
 
+async def test_stop_during_a_restart_lets_the_close_finish(tmp_path: Path, monkeypatch) -> None:
+    """Shutting down while a restart closes the old backend still lets that close complete."""
+    backends: list[_SlowBackend] = []
+
+    def create(_self: Engine, _user: object) -> tuple[_SlowBackend, str]:
+        backends.append(_SlowBackend())
+        return backends[-1], "slow"
+
+    monkeypatch.setattr(Engine, "_create_backend", create)
+    engine = Engine(_configured_store(tmp_path), rate_hz=50)
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    assert await _wait_until(lambda: engine.is_streaming)
+    await engine.restart_stream("tv1")
+    await asyncio.sleep(0.05)  # the old backend is now closing
+    await engine.stop()
+    assert backends[0].closed
+
+
+async def test_concurrent_restarts_during_startup_coalesce(tmp_path: Path, monkeypatch) -> None:
+    """Two restarts racing a stream start close the starting backend once and open one stream."""
+    backends: list[_SlowBackend] = []
+
+    def create(_self: Engine, _user: object) -> tuple[_SlowBackend, str]:
+        backends.append(_SlowBackend())
+        return backends[-1], "slow"
+
+    monkeypatch.setattr(Engine, "_create_backend", create)
+    engine = Engine(_configured_store(tmp_path), rate_hz=50)
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    assert await _wait_until(lambda: len(backends) == 1)  # its start() is now in progress
+    await asyncio.gather(engine.restart_stream("tv1"), engine.restart_stream("tv1"))
+    for _ in range(25):
+        engine.submit_color("tv1", "1", (65535, 0, 0))
+        await asyncio.sleep(0.02)
+    assert await _wait_until(lambda: engine.is_streaming)
+    assert await _wait_until(lambda: backends[0].closed)
+    live = [backend for backend in backends if backend.streaming]
+    assert len(live) == 1
+    assert live[0].started_at >= backends[0].closed_at
+    await engine.stop()
+
+
 async def test_failed_start_backs_off_before_retrying(tmp_path: Path, monkeypatch) -> None:
     """A start that fails is retried after a pause, not on every inbound frame."""
     starts: list[float] = []

@@ -74,6 +74,10 @@ class Engine:
         self._smoothed_float: dict[str, tuple[float, float, float]] = {}
         self._smoothed_buffer = ColorBuffer()
         self._backend: OutputBackend | None = None
+        # A torn-down backend's close (for Zigbee: restoring the lamps) still in progress.
+        self._closing: asyncio.Task[None] | None = None
+        # True while restart_stream() replaces the transition; concurrent restarts coalesce.
+        self._restarting = False
         self._ticker: asyncio.Task[None] | None = None
         self._health_task: asyncio.Task[None] | None = None
         self._transition_task: asyncio.Task[None] | None = None
@@ -246,13 +250,17 @@ class Engine:
 
     async def restart_stream(self, owner: str) -> None:
         """Restart a TV's active stream so changed stream settings (target, lights) apply now."""
-        if self._stream_owner != owner:
+        if self._stream_owner != owner or self._restarting:
             return
-        self._stream_gen += 1
-        await self._cancel_transition()
-        # The teardown runs as the ownership transition, so frames arriving while the old backend
-        # closes (restoring Zigbee lamps) can't start a replacement alongside it.
-        self._transition_task = asyncio.create_task(self._restart())
+        self._restarting = True
+        try:
+            self._stream_gen += 1
+            await self._cancel_transition()
+            # The teardown runs as the ownership transition, so frames arriving while the old
+            # backend closes (restoring Zigbee lamps) can't start a replacement alongside it.
+            self._transition_task = asyncio.create_task(self._restart())
+        finally:
+            self._restarting = False
 
     def identify(self, owner: str, light_id: str, *, sustained: bool = False) -> None:
         """
@@ -472,6 +480,9 @@ class Engine:
 
     async def _open_stream(self, owner: str) -> bool:
         """Open the output stream for one TV and start its ticker."""
+        # Never overlap a previous backend that is still closing (restoring its lamps).
+        with suppress(Exception):
+            await self._wait_for_close()
         user = paired_user(self._store, owner)
         created = self._create_backend(user) if user is not None else None
         if user is None or created is None:
@@ -488,8 +499,9 @@ class Engine:
             # stop() cancelled us mid-connect. If the cancel landed after backend.start() had
             # already activated the area on the bridge (its pre-DTLS HTTP PUT), the backend is
             # orphaned here - close it so the area is deactivated and the HTTP session released.
+            self._closing = asyncio.create_task(backend.aclose())
             with suppress(Exception):
-                await backend.aclose()
+                await self._wait_for_close()
             raise
         except Exception:
             LOGGER.exception("Failed to start outbound stream to %s", target)
@@ -625,4 +637,18 @@ class Engine:
         self._logged_empty = False
         self._logged_no_stream = False
         if backend is not None:
-            await backend.aclose()
+            # Closing restores Zigbee lamps: it runs on even when this teardown is cancelled, and
+            # the next stream (or shutdown) waits for it.
+            self._closing = asyncio.create_task(backend.aclose())
+        await self._wait_for_close()
+
+    async def _wait_for_close(self) -> None:
+        """Wait for a backend close still in progress; it keeps running if we are cancelled."""
+        closing = self._closing
+        if closing is None:
+            return
+        try:
+            await asyncio.shield(closing)
+        finally:
+            if closing.done() and self._closing is closing:
+                self._closing = None
