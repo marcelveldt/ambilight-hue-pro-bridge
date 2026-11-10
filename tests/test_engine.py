@@ -754,6 +754,32 @@ async def test_concurrent_restarts_during_startup_coalesce(tmp_path: Path, monke
     await engine.stop()
 
 
+async def test_open_rechecks_ownership_after_waiting_for_a_close(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A TV disabled while its stream waits for an earlier close never gets a backend."""
+    backends: list[_SlowBackend] = []
+
+    def create(_self: Engine, _user: object) -> tuple[_SlowBackend, str]:
+        backends.append(_SlowBackend())
+        return backends[-1], "slow"
+
+    monkeypatch.setattr(Engine, "_create_backend", create)
+    store = _configured_store(tmp_path)
+    engine = Engine(store, rate_hz=50)
+    release = asyncio.Event()
+    engine._closing = asyncio.create_task(release.wait())  # an earlier backend still closing
+    engine.submit_color("tv1", "1", (65535, 0, 0))
+    await asyncio.sleep(0.05)  # the new stream now waits for that close
+    store.config.users[0].enabled = False
+    engine.tv_settings_changed("tv1")
+    release.set()
+    await asyncio.sleep(0.1)
+    assert backends == []
+    assert engine.stream_owner is None
+    await engine.stop()
+
+
 async def test_failed_start_backs_off_before_retrying(tmp_path: Path, monkeypatch) -> None:
     """A start that fails is retried after a pause, not on every inbound frame."""
     starts: list[float] = []

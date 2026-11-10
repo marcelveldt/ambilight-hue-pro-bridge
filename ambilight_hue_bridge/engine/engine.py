@@ -480,16 +480,19 @@ class Engine:
 
     async def _open_stream(self, owner: str) -> bool:
         """Open the output stream for one TV and start its ticker."""
+        gen = self._stream_gen
         # Never overlap a previous backend that is still closing (restoring its lamps).
         with suppress(Exception):
             await self._wait_for_close()
         user = paired_user(self._store, owner)
-        created = self._create_backend(user) if user is not None else None
+        # The TV may have been disabled or preempted while we waited (that bumps the gen).
+        created = (
+            self._create_backend(user) if user is not None and gen == self._stream_gen else None
+        )
         if user is None or created is None:
             if self._stream_owner == owner:
                 self._stream_owner = None
             return False
-        gen = self._stream_gen
         backend, target = created
         lights = user.lights
         try:
