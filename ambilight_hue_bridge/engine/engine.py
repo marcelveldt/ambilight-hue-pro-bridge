@@ -637,12 +637,7 @@ class Engine:
         if user.target is StreamTarget.ZIGBEE:
             lamps = user.zigbee_lights
             rate = self._zigbee_rate(user.username)
-            backend = ZigbeeBackend(
-                self._home_assistant,
-                lamps,
-                split_gradients=user.split_gradients,
-                max_rate_hz=rate,
-            )
+            backend = ZigbeeBackend(self._home_assistant, lamps, max_rate_hz=rate)
             return backend, f"{len(lamps)} Zigbee lamp(s) at {rate:g} Hz"
         bridge = active_bridge(self._store)
         if bridge is None:

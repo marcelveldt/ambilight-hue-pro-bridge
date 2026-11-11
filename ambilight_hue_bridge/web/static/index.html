@@ -9,11 +9,15 @@
   <title>Ambilight+Hue Pro Bridge</title>
   <style>
     :root { color-scheme: light dark; }
+    [hidden] { display: none !important; }
     body { font-family: system-ui, sans-serif; margin: 0; padding: 1.5rem; line-height: 1.5; }
     main { max-width: 720px; margin: 0 auto; }
     h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
     h2 { font-size: 1.1rem; margin: 1.75rem 0 .5rem; }
+    p { margin: .3rem 0; }
+    a, button.link { color: LinkText; }
     .muted { opacity: .7; font-size: .9rem; }
+    .hint { opacity: .7; font-size: .85rem; margin-top: .2rem; }
     .card { border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
             border-radius: 10px; padding: .9rem 1rem; margin: .6rem 0; }
     .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
@@ -22,79 +26,124 @@
             border: 1px solid color-mix(in srgb, currentColor 30%, transparent); background: transparent; }
     button { cursor: pointer; }
     button.primary { background: #2b6cb0; color: #fff; border-color: #2b6cb0; }
+    button.link { border: 0; padding: 0; background: none; text-decoration: underline; }
     button:disabled { opacity: .5; cursor: default; }
-    .badge { font-size: .75rem; padding: .1rem .5rem; border-radius: 999px;
+    .badge { font-size: .75rem; padding: .1rem .5rem; border-radius: 999px; white-space: nowrap;
             border: 1px solid color-mix(in srgb, currentColor 30%, transparent); }
     .badge.on { background: #2f855a; color: #fff; border-color: #2f855a; }
     .badge.active { background: #2b6cb0; color: #fff; border-color: #2b6cb0; }
     .error { color: #c53030; font-size: .9rem; }
-    ul { padding-left: 1.1rem; margin: .3rem 0; }
+    .name { flex: 1 1 12rem; min-width: 0; font-weight: 600; padding: .15rem .4rem; margin-left: -.4rem;
+            border-color: color-mix(in srgb, currentColor 12%, transparent); }
+    .name:hover, .name:focus { border-color: color-mix(in srgb, currentColor 40%, transparent); }
+    .switch-label { display: inline-flex; align-items: center; gap: .4rem; font-size: .9rem; cursor: pointer; }
+    input.switch { appearance: none; width: 2.25rem; height: 1.3rem; padding: 0; margin: 0; border: 0;
+            border-radius: 999px; position: relative; cursor: pointer; transition: background .15s;
+            background: color-mix(in srgb, currentColor 25%, transparent); }
+    input.switch::before { content: ""; position: absolute; top: .15rem; left: .15rem; width: 1rem;
+            height: 1rem; border-radius: 50%; background: #fff; transition: transform .15s;
+            box-shadow: 0 1px 2px rgb(0 0 0 / .3); }
+    input.switch:checked { background: #2b6cb0; }
+    input.switch:checked::before { transform: translateX(.95rem); }
+    input.switch:focus-visible { outline: 2px solid #2b6cb0; outline-offset: 2px; }
+    .field { display: grid; grid-template-columns: 10rem minmax(0, 1fr); gap: .2rem .75rem;
+            align-items: baseline; margin-top: .7rem; }
+    .field > .label { opacity: .7; font-size: .9rem; }
+    .lamps { display: flex; flex-wrap: wrap; gap: .4rem; }
+    .chip { display: inline-flex; gap: .35rem; align-items: center; font-size: .85rem; padding: .15rem .55rem;
+            border-radius: 999px; border: 1px solid color-mix(in srgb, currentColor 30%, transparent); }
+    .sees { margin-top: .7rem; font-size: .9rem; }
+    details { margin-top: .6rem; }
+    summary { cursor: pointer; font-size: .9rem; opacity: .8; }
+    .footer { margin-top: 2.5rem; }
+    dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .2rem 1rem;
+         margin: .5rem 0; font-size: .9rem; }
+    dt { opacity: .7; }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    @media (max-width: 520px) {
+      body { padding: 1rem; }
+      .field { grid-template-columns: minmax(0, 1fr); }
+    }
   </style>
 </head>
 <body>
 <main>
   <h1 id="title">Ambilight+Hue Pro Bridge</h1>
-  <p class="muted" id="subtitle">Loading…</p>
+  <p class="error" id="load-error" hidden></p>
 
   <p class="muted" id="intro">
-    This service poses as a Philips Hue bridge so your TV's <em>Ambilight+Hue</em> can connect to
-    it. Pair your real Hue bridge below, then give each TV an entertainment area to control — the
-    TV arranges those lights around its screen and we forward the colours to your bridge. With
-    Home Assistant's ZHA on a Ziggurat radio, a TV can instead stream straight to Zigbee lamps.
+    Lets your Philips Ambilight+Hue TV drive your Hue lights again. Pair your Hue bridge<span
+    id="intro-zigbee" hidden> (or use Hue lamps on Home Assistant's Zigbee)</span>, then pair your
+    TV from its Ambilight+Hue setup.
   </p>
 
-  <h2>① Your Hue bridge</h2>
-  <p class="muted">
-    The real Hue bridge your lights live on — where we send the TV's colours. Press its link
-    button, then <em>Pair</em> (or <em>Discover</em> it on the network).
-  </p>
-  <div class="card">
-    <div class="row">
-      <input id="host" type="text" placeholder="192.168.1.50" size="16" />
-      <button class="primary" id="pair-btn" onclick="pair()">Pair</button>
-      <button id="discover-btn" onclick="discover()">Discover</button>
-      <span class="muted" id="pair-status"></span>
-    </div>
-    <div id="discovered" class="row" style="margin-top:.5rem"></div>
-  </div>
+  <h2>① Hue bridge</h2>
   <div id="bridges"></div>
-
-  <h2>② TVs &amp; their lights</h2>
-  <p class="muted">
-    Each paired TV controls one <em>entertainment area</em> from your Hue bridge — just the set of
-    lights it drives (positions set in the Hue app are ignored; the TV places them itself). Tick
-    <em>split gradient zones</em> to expose each zone of a gradient strip as its own light.
-    Enable or disable forwarding per TV and use priority to decide which TV gets the single Hue
-    streaming slot (a higher number wins). When Home Assistant's ZHA runs on a Ziggurat radio, a
-    TV can stream to <em>Zigbee lights</em> instead: up to 10 Hue colour lamps, driven directly
-    over Zigbee without a Hue bridge and restored to their previous state when streaming stops.
-  </p>
-  <div id="tvs"><p class="muted">No TVs paired yet — add this bridge from the TV's Ambilight+Hue menu.</p></div>
-
-  <section id="ha-section" hidden>
-    <h2>③ Home Assistant (optional)</h2>
+  <div id="pair-form">
     <p class="muted">
-      Only needed for the <em>Zigbee lights</em> target. Enter your Home Assistant URL and a
-      long-lived access token of an administrator (your profile → Security).
+      Click <em>Pair</em>, then press the link button on your Hue bridge.<span id="bridge-skip" hidden>
+      Only using Zigbee lamps from Home Assistant? Skip this step.</span>
     </p>
     <div class="card">
       <div class="row">
-        <input id="ha-url" type="url" placeholder="http://homeassistant.local:8123" style="flex:1" />
-        <input id="ha-token" type="password" autocomplete="off" style="flex:1" />
+        <input id="host" type="text" placeholder="Bridge IP address" aria-label="Bridge IP address" size="16" />
+        <button class="primary" id="pair-btn" onclick="pair()">Pair</button>
+        <button id="discover-btn" onclick="discover()">Find bridge</button>
+      </div>
+      <div id="discovered" class="row" style="margin-top:.5rem"></div>
+    </div>
+  </div>
+  <div id="pair-status"></div>
+  <button class="link" id="pair-another" onclick="showPairForm()" hidden>Pair another bridge</button>
+
+  <section id="ha-section" hidden>
+    <h2>Home Assistant connection (for Zigbee lamps)</h2>
+    <p class="muted">
+      Only needed for Zigbee lamps. Enter Home Assistant's address and a long-lived access token
+      from an admin user (Profile → Security).
+    </p>
+    <div class="card">
+      <div class="row">
+        <input id="ha-url" type="url" placeholder="http://homeassistant.local:8123"
+               aria-label="Home Assistant address" style="flex:1" />
+        <input id="ha-token" type="password" autocomplete="off" aria-label="Access token" style="flex:1" />
         <button class="primary" id="ha-save" onclick="saveHomeAssistant()">Save</button>
       </div>
       <span class="muted" id="ha-status"></span>
     </div>
   </section>
+
+  <h2>② TVs</h2>
+  <p class="muted">
+    Every TV that paired with this bridge shows up here. Choose which lights it controls.
+  </p>
+  <div id="tvs"></div>
+
+  <details class="footer">
+    <summary>Details</summary>
+    <dl>
+      <dt>Virtual bridge ID</dt><dd id="info-bridge-id"></dd>
+      <dt>Address</dt><dd id="info-address"></dd>
+      <dt>Home Assistant</dt><dd id="info-ha"></dd>
+      <dt>Zigbee lamps</dt><dd id="info-zigbee"></dd>
+    </dl>
+  </details>
 </main>
 
 <script>
 // Mirrors MAX_ZIGBEE_LIGHTS on the server, which also enforces it.
 const MAX_ZIGBEE_LIGHTS = 10;
+const TWO_BRIDGE_HELP =
+  "https://github.com/marcelveldt/ambilight-hue-pro-bridge#the-two-bridge-catch-important";
 // The ZHA lamps and Home Assistant connection, loaded on page load and after saving the
 // connection - not on the TV poll, as listing the lamps queries Home Assistant.
 let zigbee = { available: false, reason: "", lights: [] };
 let homeAssistant = { addon: false, available: false, url: "", token_set: false };
+let bridges = [];
+// Whether the pairing form stays open although a bridge is already paired.
+let pairingAnother = false;
+// TVs whose Advanced section is open, so the periodic redraw keeps it open.
+const openAdvanced = new Set();
 
 function esc(value) {
   const div = document.createElement("div");
@@ -105,37 +154,44 @@ function esc(value) {
 async function api(path, opts) {
   const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+  if (!res.ok) {
+    const error = new Error(data.error || ("HTTP " + res.status));
+    error.status = res.status;
+    throw error;
+  }
   return data;
+}
+
+function formatDate(iso) {
+  const date = new Date(iso);
+  return isNaN(date) ? "" : date.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }
 
 async function loadStatus() {
   const s = await api("cfg/status");
   document.getElementById("title").textContent = s.name;
-  const streaming = s.streaming ? "● streaming" : "○ idle";
-  document.getElementById("subtitle").textContent =
-    `Virtual bridge ID ${s.bridge_id} · ${s.host}:${s.http_port} · ${streaming}`;
+  document.getElementById("info-bridge-id").textContent = s.bridge_id;
+  document.getElementById("info-address").textContent = `${s.host}:${s.http_port}`;
 }
 
 async function loadBridges() {
-  const bridges = await api("cfg/bridges");
+  bridges = await api("cfg/bridges");
   const container = document.getElementById("bridges");
-  container.innerHTML = bridges.length ? "" : '<p class="muted">No bridges paired yet.</p>';
+  container.innerHTML = "";
   for (const b of bridges) container.appendChild(renderBridge(b));
-  return bridges;
+  renderPairForm();
 }
 
 function renderBridge(b) {
   const card = document.createElement("div");
   card.className = "card";
-  const badges = (b.paired ? '<span class="badge on">paired</span> ' : "")
-    + (b.active ? '<span class="badge active">active</span>' : "");
-  card.innerHTML = `<div class="row"><strong>${esc(b.host)}</strong>`
-    + ` <span class="muted">${esc(b.model)}</span>`
-    + `<span class="spacer"></span>${badges}<button data-del>Remove</button></div>`
+  const inUse = b.active && bridges.length > 1 ? '<span class="badge active">In use</span>' : "";
+  card.innerHTML = `<div class="row"><strong>Hue bridge · ${esc(b.host)}</strong>`
+    + `<span class="spacer"></span>${inUse}<button data-del>Remove…</button></div>`
     + `<span class="error" data-err></span>`;
   const err = card.querySelector("[data-err]");
   card.querySelector("[data-del]").onclick = async () => {
+    if (!confirm("Remove this Hue bridge? You'll need to pair it again to use it.")) return;
     err.textContent = "";
     try {
       await api(`cfg/bridges/${encodeURIComponent(b.id)}`, { method: "DELETE" });
@@ -145,29 +201,46 @@ function renderBridge(b) {
   return card;
 }
 
+function renderPairForm() {
+  const collapsed = bridges.length > 0 && !pairingAnother;
+  document.getElementById("pair-form").hidden = collapsed;
+  document.getElementById("pair-another").hidden = !collapsed;
+}
+
+function showPairForm() {
+  pairingAnother = true;
+  renderPairForm();
+  document.getElementById("host").focus();
+}
+
 async function pair() {
   const host = document.getElementById("host").value.trim();
   const btn = document.getElementById("pair-btn");
+  if (btn.disabled) return;  // a pairing is still waiting for the link button
   const status = document.getElementById("pair-status");
   status.className = "muted";
-  if (!host) { status.textContent = "Enter the bridge IP address first."; return; }
-  btn.disabled = true;
-  status.textContent = "Press the link button on the bridge… (waiting up to 30s)";
+  if (!host) { status.textContent = "Enter your Hue bridge's IP address, or click Find bridge."; return; }
+  const buttons = [btn, ...document.querySelectorAll("#discovered button")];
+  for (const b of buttons) b.disabled = true;
+  status.textContent = "Press the link button on your Hue bridge now… (30 seconds)";
   try {
     await api("cfg/bridges/pair", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ host }),
     });
-    status.className = "muted";
-    status.textContent = "Paired!";
+    status.textContent = "Hue bridge paired.";
     document.getElementById("host").value = "";
+    document.getElementById("discovered").innerHTML = "";
+    pairingAnother = false;
     await refresh();
   } catch (e) {
-    status.className = "error";
-    status.textContent = "Pairing failed: " + (e.message || e);
+    status.className = "";
+    status.innerHTML = `<span class="error">Couldn't pair. Check the IP address and press the `
+      + "link button within 30 seconds.</span>"
+      + `<br><small class="muted">${esc(e.message || e)}</small>`;
   } finally {
-    btn.disabled = false;
+    for (const b of buttons) b.disabled = false;
   }
 }
 
@@ -175,20 +248,28 @@ async function discover() {
   const btn = document.getElementById("discover-btn");
   const out = document.getElementById("discovered");
   btn.disabled = true;
-  out.innerHTML = '<span class="muted">Searching for bridges… (a few seconds)</span>';
+  out.innerHTML = '<span class="muted">Looking for Hue bridges…</span>';
   try {
     const found = await api("cfg/discover");
-    if (!found.length) { out.innerHTML = '<span class="muted">No bridges found.</span>'; return; }
+    if (!found.length) {
+      out.innerHTML = '<span class="muted">No Hue bridge found. Enter its IP address (shown in '
+        + "the Hue app's bridge settings or your router).</span>";
+      return;
+    }
     out.innerHTML = "";
     for (const b of found) {
       const chip = document.createElement("button");
-      chip.textContent = b.host + (b.id ? ` (${b.id})` : "");
-      chip.title = "Use this bridge";
-      chip.onclick = () => { document.getElementById("host").value = b.host; };
+      chip.textContent = b.name ? `${b.name} · ${b.host}` : b.host;
+      chip.title = "Pair this bridge";
+      chip.onclick = () => {
+        document.getElementById("host").value = b.host;
+        pair();
+      };
       out.appendChild(chip);
     }
   } catch (e) {
-    out.innerHTML = `<span class="error">${esc(e.message || e)}</span>`;
+    out.innerHTML =
+      `<span class="error">Couldn't search the network. Enter the IP address instead.</span>`;
   } finally {
     btn.disabled = false;
   }
@@ -204,16 +285,24 @@ async function loadHomeAssistant() {
   document.getElementById("ha-section").hidden = homeAssistant.addon;
   document.getElementById("ha-url").value = homeAssistant.url;
   document.getElementById("ha-token").placeholder = homeAssistant.token_set
-    ? "token saved — leave empty to keep"
-    : "long-lived access token";
+    ? "Saved — leave empty to keep it"
+    : "Access token";
 }
 
-function renderHaStatus() {
+function renderZigbeeState() {
+  const lampCount = zigbee.lights.length;
+  const found = `${lampCount} Hue lamp${lampCount === 1 ? "" : "s"}`;
   const status = document.getElementById("ha-status");
   status.className = zigbee.available || !homeAssistant.available ? "muted" : "error";
-  status.textContent = zigbee.available
-    ? `Connected — ${zigbee.lights.length} Hue colour lamp(s) found in ZHA.`
-    : zigbee.reason;
+  status.textContent = zigbee.available ? `Connected: ${found} found.` : zigbee.reason;
+  document.getElementById("intro-zigbee").hidden = !zigbee.available;
+  document.getElementById("bridge-skip").hidden = !zigbee.available || bridges.length > 0;
+  document.getElementById("info-ha").textContent = homeAssistant.addon
+    ? "Connected through the add-on"
+    : homeAssistant.url || "Not set up";
+  document.getElementById("info-zigbee").textContent = zigbee.available
+    ? `Available: ${found}`
+    : "Not available. " + zigbee.reason;
 }
 
 async function saveHomeAssistant() {
@@ -231,12 +320,30 @@ async function saveHomeAssistant() {
     });
     token.value = "";
     await Promise.all([loadHomeAssistant(), loadZigbee()]);
-    renderHaStatus();
+    renderZigbeeState();
     await loadTvs();
   } catch (e) {
     status.className = "error";
     status.textContent = String(e.message || e);
   }
+}
+
+function renderArea(tv, areas) {
+  const field = (control) =>
+    `<div class="field"><span class="label">Entertainment area</span><div>${control}</div></div>`;
+  if (!bridges.length) return field("Pair your Hue bridge first (step ①).");
+  if (!areas.length) {
+    return field("Your Hue bridge has no entertainment areas yet. Create one in the Hue app, "
+      + "then reload this page.");
+  }
+  const opts = ['<option value="">Choose an area…</option>'].concat(
+    areas.map((a) =>
+      `<option value="${esc(a.id)}"${a.id === tv.entertainment_area ? " selected" : ""}>`
+      + `${esc(a.name)}</option>`),
+  ).join("");
+  return field(`<select data-area aria-label="Entertainment area">${opts}</select>`
+    + '<div class="hint">Create or change areas in the Hue app (Settings → Entertainment areas). '
+    + "The TV places the lights itself.</div>");
 }
 
 function renderZigbeeLamps(tv) {
@@ -246,110 +353,114 @@ function renderZigbeeLamps(tv) {
   // Selected lamps that ZHA no longer lists stay visible so they can be unticked.
   const lamps = zigbee.lights.concat(
     tv.zigbee_lights.filter((lamp) => !known.has(lamp.ieee))
-      .map((lamp) => ({ ieee: lamp.ieee, name: lamp.name || lamp.ieee, area: "", missing: true })),
+      .map((lamp) => ({ ieee: lamp.ieee, name: lamp.name || "Unknown lamp", area: "", missing: true })),
   );
   const full = selected.length >= MAX_ZIGBEE_LIGHTS;
   const items = lamps.map((lamp) => {
     const checked = selected.includes(lamp.ieee);
     const zoneCount = zones.get(lamp.ieee) || 1;
-    return `<label class="badge"><input type="checkbox" data-lamp="${esc(lamp.ieee)}"`
+    return `<label class="chip"><input type="checkbox" data-lamp="${esc(lamp.ieee)}"`
       + `${checked ? " checked" : ""}${!checked && full ? " disabled" : ""}/> ${esc(lamp.name)}`
       + (lamp.area ? ` <span class="muted">${esc(lamp.area)}</span>` : "")
       + (zoneCount > 1 ? ` <span class="muted">${esc(zoneCount)} zones</span>` : "")
-      + (lamp.missing ? ' <span class="error">not found in ZHA</span>' : "")
+      + (lamp.missing ? ' <span class="error">missing in Home Assistant</span>' : "")
       + `</label>`;
   }).join("");
+  const empty = zigbee.available
+    ? `<span class="muted">No Hue colour lamps found in Home Assistant's Zigbee (ZHA).</span>`
+    : "";
   const reason = zigbee.available ? "" : `<span class="error">${esc(zigbee.reason)}</span>`;
-  return `<div class="row" style="margin-top:.6rem"><span class="muted">Lamps `
-    + `(up to ${MAX_ZIGBEE_LIGHTS})</span>${items || (zigbee.available ? '<span class="muted">'
-    + "No Hue colour lamps found in ZHA.</span>" : "")}${reason}</div>`
-    + `<div class="row"><label class="badge"><input type="checkbox" data-split`
-    + `${tv.split_gradients ? " checked" : ""}/> split gradient zones</label></div>`;
+  return `<div class="field"><span class="label">Lamps (pick up to ${MAX_ZIGBEE_LIGHTS})</span>`
+    + `<div class="lamps">${items || empty}${reason}</div></div>`;
 }
 
 // TV edits in flight, and a count of all edits made, so a redraw never shows older state.
 let tvEdits = 0;
 let tvEditSeq = 0;
 
-async function loadTvs() {
+async function loadTvs(poll = false) {
   // Redrawing from state read while an edit is pending, or before it, would reset its
   // checkboxes, and the next tick would then send that stale selection.
-  if (tvEdits) return;
+  if (tvEdits || (poll && editingTv())) return;
   const seq = tvEditSeq;
   const tvs = await api("cfg/tvs");
   // Areas only fill the per-TV dropdown; if the bridge is unreachable (e.g. unplugged during
   // TV pairing) that must not hide the TV list itself.
   let areas = [];
   try { areas = await api("cfg/areas"); } catch (e) { /* show TVs without area options */ }
-  if (tvEdits || seq !== tvEditSeq) return;
+  if (tvEdits || seq !== tvEditSeq || (poll && editingTv())) return;
   const container = document.getElementById("tvs");
   container.innerHTML = "";
   if (!tvs.length) {
-    container.innerHTML =
-      '<p class="muted">No TVs paired yet — add this bridge from the TV\'s Ambilight+Hue menu.</p>';
+    container.innerHTML = '<div class="card"><p>No TV paired yet. Run the Ambilight+Hue setup on '
+      + "your TV and let it search for a Hue bridge.</p>"
+      + '<p class="muted">TV finds your real Hue bridge instead? Unplug the Hue bridge, restart the '
+      + "TV, run the setup again, then plug the bridge back in. "
+      + `<a href="${TWO_BRIDGE_HELP}" target="_blank" rel="noopener">Why?</a></p></div>`;
     return;
   }
-  for (const tv of tvs) container.appendChild(renderTv(tv, areas));
+  for (const tv of tvs) container.appendChild(renderTv(tv, areas, tvs.length > 1));
 }
 
-function renderTv(tv, areas) {
+// The periodic redraw would replace a field the user is typing in or a list they opened.
+function editingTv() {
+  const el = document.activeElement;
+  return document.getElementById("tvs").contains(el)
+    && el.matches('input:not([type="checkbox"]), select');
+}
+
+function renderTv(tv, areas, showPriority) {
   const card = document.createElement("div");
   card.className = "card";
+  const title = tv.name || tv.devicetype || "TV";
   const badge = tv.streaming
-    ? '<span class="badge on">● streaming</span>'
-    : tv.enabled
-      ? '<span class="badge">idle</span>'
-      : '<span class="badge">disabled</span>';
-  const opts = ['<option value="">— not assigned (no lights) —</option>'].concat(
-    areas.map((a) =>
-      `<option value="${esc(a.id)}"${a.id === tv.entertainment_area ? " selected" : ""}>`
-      + `${esc(a.name)} (${esc(a.channels)} lights)</option>`),
-  ).join("");
+    ? '<span class="badge on">● Streaming</span>'
+    : `<span class="badge">${tv.enabled ? "Idle" : "Off"}</span>`;
   const isZigbee = tv.target === "zigbee";
   const targetRow = zigbee.available || isZigbee
-    ? `<div class="row" style="margin-top:.6rem"><span class="muted">Streams to</span>`
-      + `<select data-target><option value="hue">Hue bridge area</option>`
-      + `<option value="zigbee"${isZigbee ? " selected" : ""}>Zigbee lights (ZHA)</option>`
-      + `</select></div>`
+    ? `<div class="field"><span class="label">Lights</span><div>`
+      + `<select data-target aria-label="Lights"><option value="hue">Hue entertainment area</option>`
+      + `<option value="zigbee"${isZigbee ? " selected" : ""}>Zigbee lamps (Home Assistant)</option>`
+      + `</select></div></div>`
     : "";
-  const areaRow = `<div class="row" style="margin-top:.6rem"><span class="muted">Controls area</span>`
-    + `<select data-area>${opts}</select>`
-    + `<label class="badge"><input type="checkbox" data-split${tv.split_gradients ? " checked" : ""}/>`
-    + ` split gradient zones</label></div>`;
   const lights = (tv.lights && tv.lights.length)
-    ? esc(tv.lights.join(", "))
+    ? `Your TV sees: ${esc(tv.lights.join(", "))}`
     : isZigbee
-      ? "— none yet; tick the lamps above to give this TV its lights"
-      : "— none yet; pick an area above to give this TV its lights";
+      ? "No lights yet: tick the lamps to use."
+      : "No lights yet: choose an entertainment area.";
+  const priorityRow = showPriority
+    ? `<div class="field"><span class="label">Priority</span><div>`
+      + `<input data-priority type="number" min="0" max="100" step="1" aria-label="Priority" `
+      + `value="${Number(tv.stream_priority ?? 0)}" style="width:5rem"/>`
+      + `<div class="hint">When two TVs want the same lights, the higher number gets them.</div>`
+      + `</div></div>`
+    : "";
   const smooth = Number(tv.stream_smoothing ?? 0);
+  const paired = formatDate(tv.created);
   card.innerHTML =
-    `<div class="row"><strong>${esc(tv.devicetype || "TV")}</strong>`
-    + `<span class="muted">${tv.created ? "paired " + esc(tv.created) : ""}</span>`
-    + `<span class="spacer"></span>${badge}<button data-del>Remove</button></div>`
-    + `<div class="row" style="margin-top:.6rem">`
-    + `<label class="badge"><input type="checkbox" data-enabled${tv.enabled ? " checked" : ""}/>`
-    + ` enabled</label><span class="muted">Stream priority</span>`
-    + `<input data-priority type="number" min="0" max="100" step="1" `
-    + `value="${Number(tv.stream_priority ?? 0)}" style="width:4.5rem"/>`
-    + `<span class="muted" style="font-size:.85rem">Higher wins; the current TV wins a tie.</span>`
-    + `</div>`
+    `<div class="row"><input class="name" data-name type="text" value="${esc(title)}" `
+    + `aria-label="TV name" title="Rename this TV"/>${badge}`
+    + `<label class="switch-label">Enabled <input type="checkbox" class="switch" data-enabled`
+    + `${tv.enabled ? " checked" : ""}/></label></div>`
     + targetRow
-    + (isZigbee ? renderZigbeeLamps(tv) : areaRow)
-    + `<div class="row" style="margin-top:.3rem"><span class="muted">Smoothness</span>`
-    + `<input data-smooth type="range" min="0" max="0.95" step="0.05" value="${smooth}" style="flex:1"/>`
-    + `<span class="badge" data-smooth-val>${smooth.toFixed(2)}</span></div>`
-    + `<div class="row"><span class="muted" style="font-size:.85rem">Eases abrupt colours into `
-    + `fades. Leave at 0 for newer (fast) TVs; raise it for older ~1 Hz TVs to fill the gaps.`
-    + `</span></div>`
-    + `<div class="row" style="margin-top:.3rem"><span class="muted">Lights: ${lights}</span></div>`
+    + (isZigbee ? renderZigbeeLamps(tv) : renderArea(tv, areas))
+    + `<p class="sees">${lights}</p>`
+    + `<details data-advanced${openAdvanced.has(tv.username) ? " open" : ""}><summary>Advanced</summary>`
+    + priorityRow
+    + `<div class="field"><span class="label">Smoothing</span><div>`
+    + `<div class="row"><span class="muted">Off</span><input data-smooth type="range" min="0" `
+    + `max="0.95" step="0.05" value="${smooth}" aria-label="Smoothing" style="flex:1"/>`
+    + `<span class="muted">Smooth</span></div>`
+    + `<div class="hint">Fades between colours. Leave it off for newer TVs; turn it up for older `
+    + `TVs that update about once a second.</div></div></div>`
+    + `<div class="row" style="margin-top:.7rem"><span class="muted">`
+    + `${paired ? "Paired " + esc(paired) : ""}</span>`
+    + `<span class="spacer"></span><button data-del>Remove TV…</button></div></details>`
     + `<span class="error" data-err></span>`;
-  const sel = card.querySelector("[data-area]");
-  const split = card.querySelector("[data-split]");
-  const enabled = card.querySelector("[data-enabled]");
-  const priority = card.querySelector("[data-priority]");
-  const smoothEl = card.querySelector("[data-smooth]");
-  const smoothVal = card.querySelector("[data-smooth-val]");
   const err = card.querySelector("[data-err]");
+  const fail = (e) => {
+    err.textContent = e.status === 404 ? "This TV was removed. Reload the page." : String(e.message || e);
+  };
   const put = async (body) => {
     tvEdits += 1;
     tvEditSeq += 1;
@@ -363,29 +474,25 @@ function renderTv(tv, areas) {
       tvEdits -= 1;
     }
   };
-  const save = async () => {
+  const save = async (body) => {
     err.textContent = "";
     try {
-      const body = { split_gradients: split.checked };
-      if (sel) body.entertainment_area = sel.value;
       await put(body);
       await loadTvs();
-    } catch (e) { err.textContent = String(e.message || e); }
+    } catch (e) { fail(e); }
   };
-  if (sel) sel.onchange = save;
-  if (split) split.onchange = save;
+  const name = card.querySelector("[data-name]");
+  name.onchange = () => save({ name: name.value.trim() });
+  name.onkeydown = (event) => {
+    if (event.key === "Escape") name.value = title;
+    if (event.key === "Enter" || event.key === "Escape") name.blur();
+  };
+  const sel = card.querySelector("[data-area]");
+  if (sel) sel.onchange = () => save({ entertainment_area: sel.value });
   const target = card.querySelector("[data-target]");
-  if (target) {
-    target.onchange = async () => {
-      err.textContent = "";
-      try {
-        await put({ target: target.value });
-        await loadTvs();
-      } catch (e) { err.textContent = String(e.message || e); }
-    };
-  }
+  if (target) target.onchange = () => save({ target: target.value });
   for (const box of card.querySelectorAll("[data-lamp]")) {
-    box.onchange = async () => {
+    box.onchange = () => {
       const ticked = new Set(
         [...card.querySelectorAll("[data-lamp]:checked")].map((b) => b.dataset.lamp),
       );
@@ -394,52 +501,61 @@ function renderTv(tv, areas) {
       const kept = tv.zigbee_lights.filter((lamp) => ticked.has(lamp.ieee));
       const added = [...ticked].filter((ieee) => !kept.some((lamp) => lamp.ieee === ieee))
         .map((ieee) => ({ ieee, name: names.get(ieee) || "" }));
-      err.textContent = "";
-      try {
-        await put({ target: "zigbee", zigbee_lights: kept.concat(added) });
-        await loadTvs();
-      } catch (e) { err.textContent = String(e.message || e); }
+      save({ target: "zigbee", zigbee_lights: kept.concat(added) });
     };
   }
-  const savePolicy = async () => {
-    err.textContent = "";
-    try {
-      await put({ enabled: enabled.checked, stream_priority: Number(priority.value) });
-      await loadTvs();
-    } catch (e) { err.textContent = String(e.message || e); }
-  };
-  enabled.onchange = savePolicy;
-  priority.onchange = savePolicy;
+  const enabled = card.querySelector("[data-enabled]");
+  enabled.onchange = () => save({ enabled: enabled.checked });
+  const priority = card.querySelector("[data-priority]");
+  if (priority) {
+    priority.onchange = () => {
+      const value = Math.min(100, Math.max(0, Math.round(Number(priority.value) || 0)));
+      priority.value = value;
+      save({ stream_priority: value });
+    };
+  }
+  const smoothEl = card.querySelector("[data-smooth]");
   let smoothTimer = null;
   smoothEl.oninput = () => {
-    const v = Number(smoothEl.value);
-    smoothVal.textContent = v.toFixed(2);
     // Debounce; PUT smoothing alone so the TV's lights aren't rebuilt.
     clearTimeout(smoothTimer);
-    smoothTimer = setTimeout(() => put({ stream_smoothing: v }).catch(() => {}), 150);
+    smoothTimer = setTimeout(async () => {
+      err.textContent = "";
+      try { await put({ stream_smoothing: Number(smoothEl.value) }); } catch (e) { fail(e); }
+    }, 150);
   };
+  const advanced = card.querySelector("[data-advanced]");
+  advanced.addEventListener("toggle", () => {
+    if (advanced.open) openAdvanced.add(tv.username);
+    else openAdvanced.delete(tv.username);
+  });
   card.querySelector("[data-del]").onclick = async () => {
+    if (!confirm("Remove this TV? To use it again you must pair it from the TV, which may need "
+      + "the unplug-the-Hue-bridge steps.")) return;
     err.textContent = "";
     try {
       await api(`cfg/tvs/${encodeURIComponent(tv.username)}`, { method: "DELETE" });
+      openAdvanced.delete(tv.username);
       await loadTvs();
-    } catch (e) { err.textContent = String(e.message || e); }
+    } catch (e) { fail(e); }
   };
   return card;
 }
 
 async function refresh() {
-  const [, bridges] = await Promise.all([
-    loadStatus(), loadBridges(), loadHomeAssistant(), loadZigbee(),
-  ]);
-  renderHaStatus();
+  await Promise.all([loadStatus(), loadBridges(), loadHomeAssistant(), loadZigbee()]);
+  renderZigbeeState();
   await loadTvs();
   // First-run convenience: scan for bridges automatically when none are configured yet.
   if (!bridges.length) discover();
 }
 
-refresh().catch((e) => { document.getElementById("subtitle").textContent = "Error: " + e.message; });
-setInterval(() => { loadStatus().catch(() => {}); loadTvs().catch(() => {}); }, 4000);
+refresh().catch((e) => {
+  const error = document.getElementById("load-error");
+  error.textContent = `Can't load the settings (${e.message || e}). Reload the page to try again.`;
+  error.hidden = false;
+});
+setInterval(() => { loadTvs(true).catch(() => {}); }, 4000);
 </script>
 </body>
 </html>

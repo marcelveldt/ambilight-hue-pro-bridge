@@ -224,7 +224,6 @@ real_bridges:                        # one or more real Hue bridges (V2 square o
     host: "192.168.1.50"
     app_key: "<clip v2 username>"
     client_key: "<32 hex PSK>"       # for the entertainment DTLS stream
-    model: "v2"                      # "v2" | "pro" (informational; same code path)
     cached_areas: []                 # last-seen areas; serves the UI while the bridge is down
 active_real_bridge: "192-168-1-50"   # which bridge TVs stream to (empty => the first)
 home_assistant:                      # manual connection for the Zigbee target (unused as add-on)
@@ -236,11 +235,11 @@ users:                               # paired TVs; each is assigned an area in t
     clientkey: "<32 hex PSK>"        # for the TV's inbound DTLS stream
     devicetype: "55POS9002/12"
     created: "2026-06-10T12:00:00"
+    name: ""                         # name given in the web UI ("" => it shows the devicetype)
     enabled: true                    # false keeps the virtual connection but blocks outbound Hue
     stream_priority: 0               # 0..100; higher wins when TVs want the same output
     target: "hue"                    # "hue" (entertainment area) | "zigbee" (ZHA lamps)
     entertainment_area: "<v2 rid>"   # the real-bridge area this TV drives ("" => no lights)
-    split_gradients: true            # expose each gradient zone as its own virtual light
     stream_smoothing: null           # per-TV temporal easing (null/0 = off, capped at 0.95)
     lights:                          # what the TV sees; rebuilt from the area on assignment
       - id: "1"
@@ -257,8 +256,8 @@ users:                               # paired TVs; each is assigned an area in t
 Notes: lights resolve **per TV** — a TV with no area (`entertainment_area: ""`) sees no lights
 and does not stream. A freshly paired TV is auto-assigned the active bridge's first area (from
 `cached_areas`, so it works even mid discovery-dance); each TV's `lights` are rebuilt from its
-assigned area when you (re)set it in the web UI (split gradients = one virtual light per zone,
-else one per device). Temporal easing is **per TV** (`stream_smoothing`) — fast DTLS TVs want 0,
+assigned area when you (re)set it in the web UI (one virtual light per channel, so each gradient
+zone is its own light). Temporal easing is **per TV** (`stream_smoothing`) — fast DTLS TVs want 0,
 ~1 Hz REST TVs want easing to fill the gaps. Enabled state and priority are also per TV. Disabled
 TVs may keep a pending virtual activation but never open the outbound session; among TVs on the
 same output, a strictly higher priority active TV preempts the current owner, while the current
@@ -402,7 +401,7 @@ and each stream start):
 
 A TV stores its lamps by IEEE address; `ZigbeeBackend` resolves the current network address of
 each on every stream start and skips lamps ZHA no longer has. The TV's virtual lights are one per
-lamp, or with `split_gradients` one per zone of a gradient lamp (up to 3; its segment count is read
+lamp, or one per zone of a gradient lamp (up to 3; its segment count is read
 once with `read_segment_counts` when the lamp is added). `zigbee_channels` numbers the channels in
 lamp order for both the virtual lights and the backend, so a skipped lamp keeps the others'
 channel ids. The session captures the lamps' state on start and

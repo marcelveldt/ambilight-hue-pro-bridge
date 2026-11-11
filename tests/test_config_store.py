@@ -37,6 +37,7 @@ def test_save_and_reload_roundtrip(tmp_path: Path) -> None:
             clientkey="k",
             devicetype="TV",
             created="2026-06-10",
+            name="Den TV",
             enabled=False,
             stream_priority=42,
             entertainment_area="area-1",
@@ -50,6 +51,7 @@ def test_save_and_reload_roundtrip(tmp_path: Path) -> None:
     config = reloaded.load()
     assert config.virtual_bridge.name == "Living Room Bridge"
     assert len(config.users) == 1
+    assert config.users[0].name == "Den TV"
     assert config.users[0].enabled is False
     assert config.users[0].stream_priority == 42
     assert config.users[0].entertainment_area == "area-1"
@@ -71,8 +73,37 @@ users:
         encoding="utf-8",
     )
     config = ConfigStore(path).load()
+    assert config.users[0].name == ""
     assert config.users[0].enabled is True
     assert config.users[0].stream_priority == 0
+
+
+def test_load_config_with_removed_settings(tmp_path: Path) -> None:
+    """A config with settings that no longer exist still loads; saving drops them."""
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+real_bridges:
+  - id: b
+    host: 1.2.3.4
+    model: v2
+users:
+  - username: u1
+    clientkey: k
+    devicetype: TV
+    created: "2026-06-10"
+    split_gradients: false
+""".lstrip(),
+        encoding="utf-8",
+    )
+    store = ConfigStore(path)
+    config = store.load()
+    assert config.real_bridges[0].host == "1.2.3.4"
+    assert config.users[0].username == "u1"
+    store.save()
+    saved = path.read_text(encoding="utf-8")
+    assert "split_gradients" not in saved
+    assert "model:" not in saved
 
 
 def test_zigbee_target_roundtrip(tmp_path: Path) -> None:

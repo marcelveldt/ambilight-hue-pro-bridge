@@ -50,7 +50,10 @@ _MAX_STREAM_PRIORITY = 100
 # The Supervisor's address on its Docker network: Home Assistant ingress requests reach an add-on
 # from here, also with host networking.
 _SUPERVISOR_IP = ip_address("172.30.32.2")
-_ADDON_ONLY_TEXT = "Open the bridge configuration from the Home Assistant sidebar."
+_ADDON_ONLY_TEXT = (
+    'This page only opens inside Home Assistant. Open "Ambilight Bridge" in the Home Assistant '
+    "sidebar."
+)
 
 
 class WebServer:
@@ -164,7 +167,7 @@ class WebServer:
         return web.json_response(self._tv_dict(user, owners))
 
     async def _handle_assign_tv(self, request: web.Request) -> web.StreamResponse:
-        """Update a TV's target, assignment, smoothing, enabled state, or stream priority."""
+        """Update a TV's name, target, assignment, smoothing, enabled state, or stream priority."""
         username = request.match_info["username"]
         user = self._tv_by_username(username)
         if user is None:
@@ -215,7 +218,7 @@ class WebServer:
                     },
                     status=400,
                 )
-        # Only rebuild the lights when the target, area/split or lamps actually change - a
+        # Only rebuild the lights when the target, area or lamps actually change - a
         # smoothing-only edit must not re-fetch the area and renumber lights the TV has already
         # been assigned.
         rebuild = False
@@ -228,9 +231,8 @@ class WebServer:
         if "entertainment_area" in body:
             user.entertainment_area = str(body["entertainment_area"])
             rebuild = True
-        if "split_gradients" in body:
-            user.split_gradients = bool(body["split_gradients"])
-            rebuild = True
+        if "name" in body:
+            user.name = str(body["name"] or "").strip()
         if "stream_smoothing" in body:
             value = body["stream_smoothing"]
             user.stream_smoothing = (
@@ -299,7 +301,7 @@ class WebServer:
         except HomeAssistantError as err:
             return web.json_response({"available": False, "reason": str(err), "lights": []})
         if url is None:
-            reason = "ZHA in Home Assistant does not run on a Ziggurat radio"
+            reason = "Zigbee lamps need Home Assistant's Zigbee (ZHA) on a Ziggurat radio."
             return web.json_response({"available": False, "reason": reason, "lights": []})
         return web.json_response(
             {
@@ -321,6 +323,7 @@ class WebServer:
         try:
             found = await discover_bridges()
         except OSError as err:
+            LOGGER.warning("Bridge discovery failed: %s", err)
             return web.json_response({"error": str(err)}, status=502)
         return web.json_response(
             [{"id": bridge.id, "host": bridge.host, "name": bridge.name} for bridge in found],
@@ -378,7 +381,7 @@ class WebServer:
             url = str(body["url"] or "").strip()
             if url and not url.startswith(("http://", "https://", "ws://", "wss://")):
                 return web.json_response(
-                    {"error": "The URL must start with http://, https://, ws:// or wss://."},
+                    {"error": "Enter the full address, starting with http:// or https://."},
                     status=400,
                 )
             if url != settings.url:
@@ -407,6 +410,7 @@ class WebServer:
         """Build the JSON representation of a paired TV (with its assignment) for the UI."""
         return {
             "username": user.username,
+            "name": user.name,
             "devicetype": user.devicetype,
             "created": user.created,
             "streaming": user.username in owners,
@@ -414,12 +418,9 @@ class WebServer:
             "stream_priority": user.stream_priority,
             "target": user.target.value,
             "entertainment_area": user.entertainment_area,
-            "split_gradients": user.split_gradients,
             "zigbee_lights": [
                 {"ieee": lamp.ieee, "name": lamp.name, "zones": len(channels)}
-                for lamp, channels in zigbee_channels(
-                    user.zigbee_lights, split_gradients=user.split_gradients
-                )
+                for lamp, channels in zigbee_channels(user.zigbee_lights)
             ],
             "stream_smoothing": user.stream_smoothing if user.stream_smoothing is not None else 0.0,
             "lights": [light.name for light in user.lights],
@@ -437,14 +438,10 @@ class WebServer:
     async def _rebuild_lights(self, user: PairedUser) -> None:
         """Rebuild the virtual lights a TV sees from its selected lamps or assigned area."""
         if user.target is StreamTarget.ZIGBEE:
-            user.lights = lights_from_zigbee(
-                user.zigbee_lights, split_gradients=user.split_gradients
-            )
+            user.lights = lights_from_zigbee(user.zigbee_lights)
         elif user.entertainment_area:
             area = await self._area_by_id(user.entertainment_area)
-            user.lights = (
-                lights_from_area(area, split_gradients=user.split_gradients) if area else []
-            )
+            user.lights = lights_from_area(area) if area else []
         else:
             user.lights = []
 
@@ -523,7 +520,6 @@ class WebServer:
         return {
             "id": bridge.id,
             "host": bridge.host,
-            "model": bridge.model,
             "paired": bool(bridge.app_key and bridge.client_key),
             "active": self._store.config.active_real_bridge == bridge.id,
         }
