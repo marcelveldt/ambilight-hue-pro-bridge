@@ -438,12 +438,14 @@ function renderTv(tv, areas, showPriority) {
       + `</div></div>`
     : "";
   const smoothing = tv.stream_smoothing;
-  // A stored custom value shows as the nearest preset, and stays until another one is picked.
-  const nearest = smoothing == null ? null : SMOOTHING_PRESETS.reduce((best, preset) =>
-    Math.abs(preset[1] - smoothing) < Math.abs(best[1] - smoothing) ? preset : best)[1];
+  // A stored value that is no preset shows as Custom, and stays until another choice is picked.
+  const custom = smoothing != null && !SMOOTHING_PRESETS.some(([, value]) => value === smoothing)
+    ? `<option value="${Number(smoothing)}" selected>Custom (${esc(Number(smoothing).toFixed(2))})</option>`
+    : "";
   const smoothOpts = ['<option value="">Auto (recommended)</option>'].concat(
     SMOOTHING_PRESETS.map(([label, value]) =>
-      `<option value="${Number(value)}"${value === nearest ? " selected" : ""}>${esc(label)}</option>`),
+      `<option value="${Number(value)}"${value === smoothing ? " selected" : ""}>${esc(label)}</option>`),
+    custom,
   ).join("");
   const paired = formatDate(tv.created);
   card.innerHTML =
