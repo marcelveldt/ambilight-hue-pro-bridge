@@ -292,6 +292,30 @@ def test_resolve_smoothing_is_per_tv_else_automatic(tmp_path: Path) -> None:
     assert engine._resolve_smoothing("tv1") == 0.0  # off stays off for a REST TV
 
 
+async def test_streamed_colors_turn_auto_smoothing_off_without_an_activation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HueStream colors are not eased, even when the TV did not activate a group since a restart."""
+    created: list[_FakeSession] = []
+
+    def factory(*args: object, **kwargs: object) -> _FakeSession:
+        session = _FakeSession(*args, **kwargs)  # type: ignore[arg-type]
+        created.append(session)
+        return session
+
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", factory)
+    engine = Engine(_configured_store(tmp_path), rate_hz=100)
+    engine.submit_color("tv1", "1", (0, 0, 0), streamed=True)
+    assert await _wait_until(lambda: bool(created) and bool(created[0].frames))
+    frames = created[0].frames
+    sent = len(frames)
+    engine.submit_color("tv1", "1", (65535, 0, 0), streamed=True)
+    assert await _wait_until(lambda: len(frames) > sent)
+    (command,) = frames[sent]  # type: ignore[misc]
+    assert (command.red, command.green, command.blue) == (65535, 0, 0)
+    await engine.stop()
+
+
 async def test_auto_smoothing_turns_off_when_a_rest_tv_starts_streaming(
     tmp_path: Path, monkeypatch
 ) -> None:
