@@ -54,6 +54,9 @@ _IDENTIFY_SELECT_S = 2.0
 _IDENTIFY_LSELECT_S = 15.0
 _IDENTIFY_BLINK_HZ = 1.5
 _IDENTIFY_RGB = (65535, 65535, 65535)
+# Automatic smoothing for a TV that only pushes v1 REST colors (about once a second), so its
+# abrupt changes become fades; a TV streaming entertainment is smooth already and gets none.
+_REST_SMOOTHING = 0.35
 
 
 class Engine:
@@ -605,11 +608,11 @@ class Engine:
         await self._teardown(slot)
 
     def _resolve_smoothing(self, owner: str) -> float:
-        """Return a TV's smoothing setting, or 0.0 (off) when it has none."""
+        """Return a TV's smoothing setting, or the automatic one for how it streams when unset."""
         user = paired_user(self._store, owner)
         if user is not None and user.stream_smoothing is not None:
             return user.stream_smoothing
-        return 0.0
+        return 0.0 if owner in self._fast_tvs else _REST_SMOOTHING
 
     def _apply_identify(self, slot: _StreamSlot, owner: str) -> None:
         """Overlay a full-white blink on lights the TV asked to identify; expire finished ones."""

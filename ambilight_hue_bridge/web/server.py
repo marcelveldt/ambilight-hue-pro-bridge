@@ -422,7 +422,7 @@ class WebServer:
                 {"ieee": lamp.ieee, "name": lamp.name, "zones": len(channels)}
                 for lamp, channels in zigbee_channels(user.zigbee_lights)
             ],
-            "stream_smoothing": user.stream_smoothing if user.stream_smoothing is not None else 0.0,
+            "stream_smoothing": user.stream_smoothing,
             "lights": [light.name for light in user.lights],
         }
 

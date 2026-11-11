@@ -278,14 +278,51 @@ async def test_identify_opens_a_stream(tmp_path: Path, monkeypatch) -> None:
     await engine.stop()
 
 
-def test_resolve_smoothing_is_per_tv_else_off(tmp_path: Path) -> None:
-    """Smoothing resolves to the owning TV's value, defaulting to 0 (off) when unset."""
+def test_resolve_smoothing_is_per_tv_else_automatic(tmp_path: Path) -> None:
+    """Smoothing resolves to the TV's value; unset, it is on for REST TVs and off once streaming."""
     store = _configured_store(tmp_path)
     engine = Engine(store)
-    assert engine._resolve_smoothing("unknown") == 0.0  # no such TV -> off
-    assert engine._resolve_smoothing("tv1") == 0.0  # tv1 has no value set -> off
+    assert engine._resolve_smoothing("tv1") == 0.35  # unset, only REST colors so far
+    engine._fast_tvs.add("tv1")
+    assert engine._resolve_smoothing("tv1") == 0.0  # unset, streams entertainment
     store.config.users[0].stream_smoothing = 0.6
     assert engine._resolve_smoothing("tv1") == 0.6  # the TV's own setting
+    engine._fast_tvs.discard("tv1")
+    store.config.users[0].stream_smoothing = 0.0
+    assert engine._resolve_smoothing("tv1") == 0.0  # off stays off for a REST TV
+
+
+async def test_auto_smoothing_turns_off_when_a_rest_tv_starts_streaming(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A REST TV's colors fade in, and stop fading in its running stream once it streams."""
+    created: list[_FakeSession] = []
+
+    def factory(*args: object, **kwargs: object) -> _FakeSession:
+        session = _FakeSession(*args, **kwargs)  # type: ignore[arg-type]
+        created.append(session)
+        return session
+
+    monkeypatch.setattr("ambilight_hue_bridge.outbound.backend.EntertainmentSession", factory)
+    engine = Engine(_configured_store(tmp_path), rate_hz=100)
+
+    async def first_frame_after(rgb: tuple[int, int, int]) -> tuple[int, int, int]:
+        """Submit a REST color and return the first frame computed after it."""
+        frames = created[0].frames
+        sent = len(frames)
+        engine.submit_color("tv1", "1", rgb)
+        assert await _wait_until(lambda: len(frames) > sent)
+        (command,) = frames[sent]  # type: ignore[misc]
+        return command.red, command.green, command.blue
+
+    engine.submit_color("tv1", "1", (0, 0, 0))
+    assert await _wait_until(lambda: bool(created) and bool(created[0].frames))
+    red, _green, _blue = await first_frame_after((65535, 0, 0))
+    assert 0 < red < 65535
+    assert engine.start_stream("tv1")
+    assert await first_frame_after((0, 65535, 0)) == (0, 65535, 0)
+    assert len(created) == 1  # the same stream, not restarted
+    await engine.stop()
 
 
 def test_submit_color_keeps_tv_buffers_isolated(tmp_path: Path) -> None:
