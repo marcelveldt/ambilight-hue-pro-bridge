@@ -50,21 +50,21 @@ class PairedUser:
     clientkey: str
     devicetype: str
     created: str
+    # Name given in the web UI ("" => the UI shows the devicetype).
+    name: str = ""
     # Whether this TV may open an outbound Hue Entertainment session.
     enabled: bool = True
     # Higher values win when multiple TVs request the same output (a Hue bridge or Zigbee lamps).
     stream_priority: int = 0
     # Where this TV's colors go: a Hue bridge entertainment area or Zigbee lamps from ZHA.
     target: StreamTarget = StreamTarget.HUE
-    # Per-TV assignment: the source-bridge entertainment area this TV drives, whether to split
-    # gradient lights into per-zone virtual lights, and the resulting lights exposed to this TV.
+    # Per-TV assignment: the source-bridge entertainment area this TV drives and the resulting
+    # lights exposed to this TV (one per channel, so each gradient zone is its own light).
     # Unassigned (empty area) => the TV sees no lights and does not stream until assigned.
     entertainment_area: str = ""
-    split_gradients: bool = True
     lights: list[VirtualLight] = field(default_factory=list)
     # The ZHA lamps a Zigbee-target TV streams to; the TV sees one light per lamp, or per zone of a
-    # gradient lamp with split_gradients. Stored by IEEE address only, as the network address can
-    # change.
+    # gradient lamp. Stored by IEEE address only, as the network address can change.
     zigbee_lights: list[ZigbeeLightRef] = field(default_factory=list)
     # Per-TV temporal easing (None/0 => off). Fast DTLS-streaming TVs are already smooth and want
     # 0; the ~1 Hz REST TVs (older models) want easing to fill the gaps between updates.
@@ -114,8 +114,6 @@ class RealBridge:
     host: str
     app_key: str = ""
     client_key: str = ""
-    # "v2" (square) or "pro" - informational; both use the same CLIP v2 + DTLS path.
-    model: str = "v2"
     # Last-seen entertainment areas, refreshed whenever we reach the bridge. Lets the web UI and
     # per-TV assignment keep working while the bridge is briefly unplugged (the discovery dance).
     cached_areas: list[CachedArea] = field(default_factory=list)

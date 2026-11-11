@@ -82,7 +82,7 @@ by IP** (it only needs the address, never discovery). Isolate *either* side:
 Force the TV onto this bridge manually: **unplug the real bridge → power-cycle the TV** (clears its
 cached bridge) **→ run the Ambilight+Hue setup** (it now finds only this bridge and locks to it) **→
 plug the real bridge back in**. The TV is auto-assigned your first entertainment area — reassign it
-(or split its gradient strips) in the web UI.
+in the web UI.
 
 Once locked, the TV keeps this bridge until *this* one restarts, which can send it drifting back —
 so isolating the bridges above is the real fix, not a one-time step.
@@ -92,15 +92,15 @@ so isolating the bridges above is the real fix, not a one-time step.
 If Home Assistant's **ZHA** integration runs on a **Ziggurat** radio, a TV can stream straight to
 Hue colour lamps on that Zigbee network, with no Hue bridge involved:
 
-1. In the web UI, set the TV's **Streams to** to **Zigbee lights (ZHA)**. The option appears once
-   Home Assistant is reachable and ZHA runs on Ziggurat.
+1. In the web UI, set the TV's **Lights** to **Zigbee lamps (Home Assistant)**. The option appears
+   once Home Assistant is reachable and ZHA runs on Ziggurat.
 2. Tick up to 10 Hue colour lamps, listed by name and area. The TV sees one light per lamp, and
-   with **split gradient zones** three per gradient lamp (a Signe or gradient lightstrip); place
-   them around the screen in the TV's Ambilight+Hue menu.
+   three per gradient lamp (a Signe or gradient lightstrip); place them around the screen in the
+   TV's Ambilight+Hue menu.
 
 As a Home Assistant add-on the connection to Home Assistant is automatic. Otherwise enter your Home
-Assistant URL and a long-lived access token of an administrator under **Home Assistant** in the web
-UI.
+Assistant URL and a long-lived access token of an administrator under **Home Assistant connection**
+in the web UI.
 
 Each lamp's state is captured when streaming starts and restored when it stops. Every frame goes to
 one lamp that relays it to the others, so pick lamps within radio range of each other.
@@ -140,9 +140,8 @@ The service is built from a few focused, decoupled components:
   Bridge V2 and Hue Bridge Pro"*). For the Zigbee lights target the same library streams
   straight onto ZHA's Ziggurat server instead.
 - **Web UI + config store** — pair the real bridge, then assign each paired TV an
-  entertainment area (optionally splitting its gradient strips into per-zone virtual
-  lights). New TVs default to your first area; until a bridge is paired a TV has no lights
-  and doesn't stream.
+  entertainment area (each zone of a gradient strip becomes its own virtual light). New TVs
+  default to your first area; until a bridge is paired a TV has no lights and doesn't stream.
 
 > Detailed protocol notes and the module map live in
 > [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -165,13 +164,13 @@ Then install **Ambilight+Hue Pro Bridge** and open its web UI from the HA sideba
 
 ### Per-TV control from Home Assistant
 
-Each TV card has an **enabled** toggle and a **stream priority** from 0 to 100. Priority settles
-which TV streams when several want the same output: the Hue bridge (one stream at a time), or Zigbee
-(two streams, the higher-priority one at the full rate; never two on the same lamp). Higher values
-win; the current TV keeps the stream on a tie. A higher-priority request closes the current
-entertainment session before opening the new TV's area. A disabled TV stays connected to the
-virtual bridge but cannot stream to the real bridge; enabling it starts its pending request unless a
-higher-priority TV is active on its output.
+Each TV card has an **Enabled** switch and, under **Advanced** once two or more TVs are paired, a
+**Priority** from 0 to 100. Priority settles which TV streams when several want the same output: the
+Hue bridge (one stream at a time), or Zigbee (two streams, the higher-priority one at the full rate;
+never two on the same lamp). Higher values win; the current TV keeps the stream on a tie. A
+higher-priority request closes the current entertainment session before opening the new TV's area. A
+disabled TV stays connected to the virtual bridge but cannot stream to the real bridge; enabling it
+starts its pending request unless a higher-priority TV is active on its output.
 
 The same settings have a JSON API for a Home Assistant REST command or REST sensor:
 
@@ -237,7 +236,7 @@ sudo ambilight-hue-bridge --http-port 80 --log-level debug
 
 # then open the web UI at http://<host>:<http-port> (e.g. http://<host>:8080) to pair
 # your Hue bridge (press the link button first). A freshly paired TV is auto-assigned your
-# first entertainment area; reassign it or split its gradient strips in the UI. A
+# first entertainment area; reassign it in the UI. A
 # `pair` / `areas` CLI is also available for headless setup.
 #
 # log levels: info (lifecycle events) < debug (the TVs' requests) < verbose (SSDP + the web

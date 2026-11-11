@@ -215,23 +215,32 @@ async def test_ziggurat_url_is_none_for_a_serial_radio(tmp_path: Path, fake_ha) 
 async def test_rejected_token_raises(tmp_path: Path, fake_ha) -> None:
     """A wrong access token fails the auth handshake with a readable error."""
     _fake, url = fake_ha
-    with pytest.raises(HomeAssistantError, match="rejected the access token"):
+    with pytest.raises(HomeAssistantError, match="didn't accept the access token"):
         await _client(tmp_path, url, token="wrong").hue_lights()
 
 
 async def test_missing_zha_raises_a_readable_error(tmp_path: Path, fake_ha) -> None:
-    """Without ZHA (its commands are unknown), the error says ZHA is not set up."""
+    """Without ZHA (its commands are unknown), the error says ZHA is needed."""
     fake, url = fake_ha
     del fake.results["zha/network/settings"]
-    with pytest.raises(HomeAssistantError, match="ZHA integration is not set up"):
+    with pytest.raises(
+        HomeAssistantError, match=r"need Home Assistant's Zigbee \(ZHA\) integration"
+    ):
         await _client(tmp_path, url).ziggurat_url()
 
 
-async def test_unreachable_home_assistant_raises(tmp_path: Path, unused_tcp_port: int) -> None:
-    """A Home Assistant that can't be reached raises the client's error type."""
+async def test_unreachable_home_assistant_raises(
+    tmp_path: Path, unused_tcp_port: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unreachable Home Assistant raises a plain error; the connection error goes to the log."""
     client = _client(tmp_path, f"http://127.0.0.1:{unused_tcp_port}")
-    with pytest.raises(HomeAssistantError, match="Could not reach Home Assistant"):
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(HomeAssistantError) as raised,
+    ):
         await client.ziggurat_url()
+    assert str(raised.value) == "Can't reach Home Assistant at this address."
+    assert any(f"127.0.0.1:{unused_tcp_port}" in record.getMessage() for record in caplog.records)
 
 
 async def test_not_configured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -240,7 +249,7 @@ async def test_not_configured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     client = _client(tmp_path, "http://homeassistant.local:8123", token="")
     assert not client.available
     assert not client.is_addon
-    with pytest.raises(HomeAssistantError, match="not connected"):
+    with pytest.raises(HomeAssistantError, match="Not connected to Home Assistant"):
         await client.hue_lights()
 
 

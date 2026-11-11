@@ -72,5 +72,5 @@ class PairingManager:
             return
         area = bridge.cached_areas[0]
         user.entertainment_area = area.id
-        user.lights = lights_from_area(area, split_gradients=user.split_gradients)
+        user.lights = lights_from_area(area)
         LOGGER.info("Auto-assigned area %r (%s) to new TV", area.name, area.id)

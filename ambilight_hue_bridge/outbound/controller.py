@@ -115,39 +115,18 @@ def active_bridge(store: ConfigStore) -> RealBridge | None:
     return bridges[0] if bridges else None
 
 
-def lights_from_area(area: Any, *, split_gradients: bool = True) -> list[VirtualLight]:
+def lights_from_area(area: Any) -> list[VirtualLight]:
     """
     Build the virtual lights a TV sees from a source entertainment area.
 
-    With ``split_gradients`` each channel becomes its own light (so the TV can drive each
-    gradient zone separately, disambiguated by on-screen position when they share a name).
-    Otherwise channels of the same light (e.g. a gradient strip's zones) are merged into one
-    light driving all its channels.
+    Each channel becomes its own light, so the TV can drive each gradient zone separately;
+    zones that share a name are told apart by their on-screen position.
 
     Works on both a live ``EntertainmentArea`` and a persisted ``CachedArea`` (both expose
     ``channels`` with ``channel_id``/``service_id``/``name``/``position``).
 
     :param area: An EntertainmentArea (live) or CachedArea (persisted) to mirror.
-    :param split_gradients: Expose each channel as a separate light (vs one light per device).
     """
-    if not split_gradients:
-        merged: dict[str, dict[str, Any]] = {}
-        order: list[str] = []
-        for channel in area.channels:
-            key = channel.service_id or channel.name
-            if key not in merged:
-                merged[key] = {"name": channel.name, "x": channel.position[0], "channels": []}
-                order.append(key)
-            merged[key]["channels"].append(channel.channel_id)
-        return [
-            VirtualLight(
-                id=str(index + 1),
-                name=_fit_name(merged[key]["name"] or f"Light {index + 1}"),
-                position=_position_from_x(merged[key]["x"]),
-                channels=merged[key]["channels"],
-            )
-            for index, key in enumerate(order)
-        ]
     name_counts: dict[str, int] = {}
     for channel in area.channels:
         name_counts[channel.name] = name_counts.get(channel.name, 0) + 1
@@ -175,19 +154,16 @@ def lights_from_area(area: Any, *, split_gradients: bool = True) -> list[Virtual
     return lights
 
 
-def lights_from_zigbee(lamps: list[ZigbeeLightRef], *, split_gradients: bool) -> list[VirtualLight]:
+def lights_from_zigbee(lamps: list[ZigbeeLightRef]) -> list[VirtualLight]:
     """
     Build the virtual lights a Zigbee-target TV sees: one per lamp or gradient zone, in order.
 
     Each light drives one channel of :func:`zigbee_channels`; its id is that channel id + 1.
 
     :param lamps: The TV's selected ZHA lamps.
-    :param split_gradients: Expose each zone of a gradient lamp as a separate light.
     """
     lights: list[VirtualLight] = []
-    for index, (lamp, channels) in enumerate(
-        zigbee_channels(lamps, split_gradients=split_gradients)
-    ):
+    for index, (lamp, channels) in enumerate(zigbee_channels(lamps)):
         base = lamp.name or f"Light {index + 1}"
         for zone, channel in enumerate(channels):
             suffix = f"zone {zone + 1}" if len(channels) > 1 else ""
@@ -197,22 +173,19 @@ def lights_from_zigbee(lamps: list[ZigbeeLightRef], *, split_gradients: bool) ->
     return lights
 
 
-def zigbee_channels(
-    lamps: list[ZigbeeLightRef], *, split_gradients: bool
-) -> list[tuple[ZigbeeLightRef, range]]:
+def zigbee_channels(lamps: list[ZigbeeLightRef]) -> list[tuple[ZigbeeLightRef, range]]:
     """
     Return each of a Zigbee-target TV's lamps with the channel ids it streams on, in order.
 
-    A gradient lamp gets one channel per zone (up to 3) when ``split_gradients`` is on; any other
-    lamp gets one channel. The channels are numbered consecutively from 0.
+    A gradient lamp gets one channel per zone (up to 3); any other lamp gets one channel. The
+    channels are numbered consecutively from 0.
 
     :param lamps: The TV's selected ZHA lamps.
-    :param split_gradients: Whether the TV splits gradient lamps into zones.
     """
     layout: list[tuple[ZigbeeLightRef, range]] = []
     start = 0
     for lamp in lamps:
-        zones = min(_ZIGBEE_GRADIENT_ZONES, lamp.segments) if split_gradients else 1
+        zones = min(_ZIGBEE_GRADIENT_ZONES, lamp.segments)
         layout.append((lamp, range(start, start + zones)))
         start += zones
     return layout

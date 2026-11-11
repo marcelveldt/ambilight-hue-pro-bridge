@@ -140,7 +140,6 @@ class ZigbeeBackend:
         home_assistant: HomeAssistantClient,
         lamps: list[ZigbeeLightRef],
         *,
-        split_gradients: bool,
         max_rate_hz: float = 25.0,
     ) -> None:
         """
@@ -149,12 +148,10 @@ class ZigbeeBackend:
         :param home_assistant: Client resolving the Ziggurat server and the lamps' addresses.
         :param lamps: The lamps to stream to, on the channels of
             :func:`~ambilight_hue_bridge.outbound.controller.zigbee_channels`.
-        :param split_gradients: Stream each zone of a gradient lamp on its own channel.
         :param max_rate_hz: Most frames per second to send; the lamps fade in between.
         """
         self._home_assistant = home_assistant
         self._lamps = lamps
-        self._split_gradients = split_gradients
         self._max_rate_hz = max_rate_hz
         self._session: ZigbeeEntertainmentSession | None = None
         self._lost_since: float | None = None
@@ -191,7 +188,7 @@ class ZigbeeBackend:
             msg = "ZHA does not run on a Ziggurat server"
             raise HomeAssistantError(msg)
         lights: list[ZigbeeLight] = []
-        for lamp, channels in zigbee_channels(self._lamps, split_gradients=self._split_gradients):
+        for lamp, channels in zigbee_channels(self._lamps):
             nwk = addresses.get(lamp.ieee.lower())
             if nwk is None:
                 LOGGER.warning(

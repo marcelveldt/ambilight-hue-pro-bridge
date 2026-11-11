@@ -125,6 +125,46 @@ async def test_tv_policy_get_and_update(aiohttp_client, tmp_path) -> None:
     assert fetched["stream_priority"] == 42
 
 
+async def test_tv_name_is_set_and_cleared(aiohttp_client, tmp_path) -> None:
+    """A TV's name is trimmed and saved without touching its lights; an empty name clears it."""
+    store = ConfigStore(tmp_path / "config.yaml")
+    store.load()
+    store.config.users = [
+        PairedUser(
+            username="u1",
+            clientkey="k",
+            devicetype="55POS9002/12",
+            created="2026-06-10",
+            lights=[VirtualLight(id="1", name="Left")],
+        ),
+    ]
+    engine = _FakePolicyEngine()
+    server = WebServer(
+        store=store,
+        engine=engine,  # type: ignore[arg-type]
+        mac="aabbccddeeff",
+        host_ip="1.2.3.4",
+        http_port=8080,
+    )
+    app = web.Application()
+    server.register(app)
+    client = await aiohttp_client(app)
+    assert (await (await client.get("/cfg/tvs/u1")).json())["name"] == ""
+
+    tv = await (await client.put("/cfg/tvs/u1", json={"name": "  Den TV  "})).json()
+    assert tv["name"] == "Den TV"
+    assert tv["devicetype"] == "55POS9002/12"
+    assert tv["lights"] == ["Left"]
+    assert engine.changed == []
+    assert engine.restarted == []
+    assert ConfigStore(tmp_path / "config.yaml").load().users[0].name == "Den TV"
+
+    for cleared in ("", "   ", None):
+        store.config.users[0].name = "Den TV"
+        tv = await (await client.put("/cfg/tvs/u1", json={"name": cleared})).json()
+        assert tv["name"] == ""
+
+
 async def test_tv_policy_rejects_invalid_values(aiohttp_client, web_setup) -> None:
     """Policy updates reject non-boolean enablement and out-of-range priorities."""
     app, store = web_setup
@@ -152,14 +192,45 @@ async def test_assign_tv_builds_lights_from_area(aiohttp_client, web_setup, monk
     ]
     monkeypatch.setattr("ambilight_hue_bridge.web.server.list_areas", _fake_areas_factory())
     client = await aiohttp_client(app)
-    tv = await (
-        await client.put(
-            "/cfg/tvs/u1", json={"entertainment_area": "area-1", "split_gradients": True}
-        )
-    ).json()
+    tv = await (await client.put("/cfg/tvs/u1", json={"entertainment_area": "area-1"})).json()
     assert tv["entertainment_area"] == "area-1"
     assert tv["lights"] == ["c0", "c1"]
     assert store.config.users[0].lights[0].channels == [0]
+
+
+async def test_assign_tv_splits_gradient_zones(aiohttp_client, web_setup, monkeypatch) -> None:
+    """Each zone of a gradient light becomes its own light, also when a client asks otherwise."""
+    app, store = web_setup
+    _configure_area(store)
+    store.config.users = [
+        PairedUser(username="u1", clientkey="k", devicetype="TV", created="2026-06-10"),
+    ]
+
+    async def fake_areas(_host: str, _app_key: str) -> list[EntertainmentArea]:
+        return [
+            EntertainmentArea(
+                id="area-1",
+                name="Living",
+                channels=[
+                    LightChannel(
+                        channel_id=0, service_id="grad", name="Strip", position=(-0.5, 0.0, 0.0)
+                    ),
+                    LightChannel(
+                        channel_id=1, service_id="grad", name="Strip", position=(0.5, 0.0, 0.0)
+                    ),
+                ],
+            ),
+        ]
+
+    monkeypatch.setattr("ambilight_hue_bridge.web.server.list_areas", fake_areas)
+    client = await aiohttp_client(app)
+    tv = await (
+        await client.put(
+            "/cfg/tvs/u1", json={"entertainment_area": "area-1", "split_gradients": False}
+        )
+    ).json()
+    assert tv["lights"] == ["Strip (left)", "Strip (right)"]
+    assert "split_gradients" not in tv
 
 
 async def test_areas_list(aiohttp_client, web_setup, monkeypatch) -> None:
@@ -230,7 +301,7 @@ def test_mirror_labels_gradient_zones_by_position() -> None:
             LightChannel(channel_id=2, service_id="g", name="Strip", position=(0.9, 0.0, 0.0)),
         ],
     )
-    names = [light.name for light in lights_from_area(area, split_gradients=True)]
+    names = [light.name for light in lights_from_area(area)]
     assert names == ["Strip (far left)", "Strip (center)", "Strip (far right)"]
 
 
@@ -289,11 +360,7 @@ async def test_assign_tv_uses_cached_area_when_bridge_unreachable(
 
     monkeypatch.setattr("ambilight_hue_bridge.web.server.list_areas", boom)
     client = await aiohttp_client(app)
-    tv = await (
-        await client.put(
-            "/cfg/tvs/u1", json={"entertainment_area": "area-1", "split_gradients": True}
-        )
-    ).json()
+    tv = await (await client.put("/cfg/tvs/u1", json={"entertainment_area": "area-1"})).json()
     assert tv["entertainment_area"] == "area-1"
     assert tv["lights"] == ["c0", "c1"]
 
@@ -318,40 +385,22 @@ def test_mirror_caps_long_names_to_32_chars() -> None:
             ),
         ],
     )
-    names = [light.name for light in lights_from_area(area, split_gradients=True)]
+    names = [light.name for light in lights_from_area(area)]
     assert all(len(n) <= 32 for n in names)
     assert names[0].endswith("(far left)")
     assert names[1].endswith("(far right)")
 
 
-def test_mirror_merges_gradient_when_not_split() -> None:
-    """With split off, channels of the same light merge into one multi-channel light."""
-    area = EntertainmentArea(
-        id="a",
-        name="A",
-        channels=[
-            LightChannel(channel_id=0, service_id="grad", name="Strip", position=(-0.5, 0.0, 0.0)),
-            LightChannel(channel_id=1, service_id="grad", name="Strip", position=(0.5, 0.0, 0.0)),
-        ],
-    )
-    assert len(lights_from_area(area, split_gradients=True)) == 2
-    merged = lights_from_area(area, split_gradients=False)
-    assert len(merged) == 1
-    assert merged[0].channels == [0, 1]
-
-
 def test_zigbee_channels_split_gradient_lamps_into_zones() -> None:
-    """With split on a gradient lamp gets up to 3 consecutive channels, any other lamp one."""
+    """A gradient lamp gets up to 3 consecutive channels, any other lamp one."""
     lamps = [
         ZigbeeLightRef(ieee="a", segments=7),
         ZigbeeLightRef(ieee="b"),
         ZigbeeLightRef(ieee="c", segments=2),
     ]
-    split = zigbee_channels(lamps, split_gradients=True)
+    split = zigbee_channels(lamps)
     assert [lamp for lamp, _channels in split] == lamps
     assert [list(channels) for _lamp, channels in split] == [[0, 1, 2], [3], [4, 5]]
-    merged = zigbee_channels(lamps, split_gradients=False)
-    assert [list(channels) for _lamp, channels in merged] == [[0], [1], [2]]
 
 
 def test_lights_from_zigbee_one_light_per_zone() -> None:
@@ -362,7 +411,7 @@ def test_lights_from_zigbee_one_light_per_zone() -> None:
         ZigbeeLightRef(ieee="c", name="Spot"),
         ZigbeeLightRef(ieee="d", segments=5),
     ]
-    lights = lights_from_zigbee(lamps, split_gradients=True)
+    lights = lights_from_zigbee(lamps)
     assert [(light.id, light.channels) for light in lights] == [
         (str(channel + 1), [channel]) for channel in range(10)
     ]
@@ -378,13 +427,6 @@ def test_lights_from_zigbee_one_light_per_zone() -> None:
         "Light 4 (zone 2)",
         "Light 4 (zone 3)",
     ]
-    merged = lights_from_zigbee(lamps, split_gradients=False)
-    assert [(light.id, light.name, light.channels) for light in merged] == [
-        ("1", "Signe floor lamp right of the TV", [0]),
-        ("2", "Signe left", [1]),
-        ("3", "Spot", [2]),
-        ("4", "Light 4", [3]),
-    ]
 
 
 async def test_index_is_served(aiohttp_client, web_setup) -> None:
@@ -395,7 +437,7 @@ async def test_index_is_served(aiohttp_client, web_setup) -> None:
     assert resp.status == 200
     body = await resp.text()
     assert "Ambilight" in body
-    assert "Stream priority" in body
+    assert "data-priority" in body
     assert "data-enabled" in body
     assert '<base href="/" />' in body
 
@@ -718,7 +760,7 @@ async def test_zigbee_lights_unavailable_without_ziggurat(aiohttp_client, web_se
 async def test_zigbee_lights_reports_home_assistant_errors(aiohttp_client, web_setup) -> None:
     """A Home Assistant error becomes the unavailable reason instead of an HTTP error."""
     _app, store = web_setup
-    error = HomeAssistantError("Home Assistant is not connected; set its URL and access token")
+    error = HomeAssistantError("Not connected to Home Assistant yet.")
     client = await aiohttp_client(_zigbee_app(store, _FakeHomeAssistant(error=error)))
     resp = await client.get("/cfg/zigbee/lights")
     assert resp.status == 200
@@ -835,15 +877,12 @@ async def test_assign_zigbee_lamps_reads_segments_of_new_lamps_only(
     saved = ConfigStore(tmp_path / "config.yaml").load().users[0].zigbee_lights
     assert [lamp.segments for lamp in saved] == [7, 1, 2]
 
-    # Removing and reordering lamps reads nothing; splitting off keeps the stored counts.
+    # Removing and reordering lamps reads nothing and keeps the stored counts.
     tv = await (
         await client.put("/cfg/tvs/u1", json={"zigbee_lights": [lamps[2], lamps[0]]})
     ).json()
     assert reads == [[0x0B, 0x0C]]
     assert [lamp["zones"] for lamp in tv["zigbee_lights"]] == [2, 3]
-    tv = await (await client.put("/cfg/tvs/u1", json={"split_gradients": False})).json()
-    assert tv["lights"] == ["Strip", "Signe"]
-    assert [lamp["zones"] for lamp in tv["zigbee_lights"]] == [1, 1]
     assert [lamp.segments for lamp in store.config.users[0].zigbee_lights] == [2, 7]
 
 
@@ -886,7 +925,7 @@ async def test_assign_zigbee_lamps_in_order_while_a_read_is_slow(
     ("home_assistant", "counts"),
     [
         pytest.param(
-            _FakeHomeAssistant(error=HomeAssistantError("Home Assistant did not respond in time")),
+            _FakeHomeAssistant(error=HomeAssistantError("Home Assistant didn't answer in time.")),
             {0x0A: 7},
             id="home-assistant-error",
         ),
@@ -952,4 +991,8 @@ async def test_home_assistant_token_is_write_only(aiohttp_client, web_setup, mon
     assert data["available"] is False
     assert store.config.home_assistant.token == ""
 
-    assert (await client.put("/cfg/homeassistant", json={"url": "ftp://x"})).status == 400
+    resp = await client.put("/cfg/homeassistant", json={"url": "ftp://x"})
+    assert resp.status == 400
+    assert (await resp.json())["error"] == (
+        "Enter the full address, starting with http:// or https://."
+    )

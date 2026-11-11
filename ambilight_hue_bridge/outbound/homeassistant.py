@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -12,6 +13,8 @@ import orjson
 
 if TYPE_CHECKING:
     from ambilight_hue_bridge.config.store import ConfigStore
+
+LOGGER = logging.getLogger(__name__)
 
 # Home Assistant's websocket API as proxied by the Supervisor; reachable from add-ons (even
 # host_network ones) when the add-on has homeassistant_api access.
@@ -139,7 +142,7 @@ class HomeAssistantClient:
         """
         connection = self._connection()
         if connection is None:
-            msg = "Home Assistant is not connected; set its URL and access token"
+            msg = "Not connected to Home Assistant yet."
             raise HomeAssistantError(msg)
         url, token = connection
         try:
@@ -156,10 +159,11 @@ class HomeAssistantClient:
                     results.append(await _result(websocket, message_id, command))
                 return results
         except TimeoutError as err:
-            msg = "Home Assistant did not respond in time"
+            msg = "Home Assistant didn't answer in time. Is it running?"
             raise HomeAssistantError(msg) from err
         except (aiohttp.ClientError, OSError) as err:
-            msg = f"Could not reach Home Assistant: {err}"
+            LOGGER.warning("Could not reach Home Assistant at %s: %s", url, err)
+            msg = "Can't reach Home Assistant at this address."
             raise HomeAssistantError(msg) from err
 
 
@@ -197,11 +201,11 @@ async def _authenticate(websocket: aiohttp.ClientWebSocketResponse, token: str) 
     """Complete Home Assistant's websocket auth handshake."""
     hello = await _receive(websocket)
     if hello.get("type") != "auth_required":
-        msg = "Unexpected response from Home Assistant; check the URL"
+        msg = "That address doesn't look like Home Assistant. Check the URL."
         raise HomeAssistantError(msg)
     await websocket.send_json({"type": "auth", "access_token": token})
     if (await _receive(websocket)).get("type") != "auth_ok":
-        msg = "Home Assistant rejected the access token"
+        msg = "Home Assistant didn't accept the access token."
         raise HomeAssistantError(msg)
 
 
@@ -216,9 +220,9 @@ async def _result(websocket: aiohttp.ClientWebSocketResponse, message_id: int, c
     error = reply.get("error") or {}
     code = error.get("code")
     if code == "unknown_command" and command.startswith("zha/"):
-        msg = "The ZHA integration is not set up in Home Assistant"
+        msg = "Zigbee lamps need Home Assistant's Zigbee (ZHA) integration."
     elif code == "unauthorized":
-        msg = "The Home Assistant access token needs an administrator account"
+        msg = "The access token must belong to an admin user."
     else:
         msg = f"Home Assistant request {command} failed: {error.get('message', code)}"
     raise HomeAssistantError(msg)
@@ -233,6 +237,6 @@ async def _receive(websocket: aiohttp.ClientWebSocketResponse) -> dict[str, Any]
     try:
         data = orjson.loads(message.data)
     except orjson.JSONDecodeError as err:
-        msg = "Unexpected response from Home Assistant; check the URL"
+        msg = "That address doesn't look like Home Assistant. Check the URL."
         raise HomeAssistantError(msg) from err
     return data if isinstance(data, dict) else {}

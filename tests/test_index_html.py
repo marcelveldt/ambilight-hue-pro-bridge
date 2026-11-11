@@ -11,7 +11,20 @@ import pytest
 # Interpolations that are not server values: HTML fragments the script builds itself (their own
 # template literals are checked too), numbers it computed, and constants.
 _SAFE_NAMES = frozenset(
-    {"badge", "badges", "items", "lights", "opts", "reason", "smooth", "MAX_ZIGBEE_LIGHTS"}
+    {
+        "badge",
+        "control",
+        "empty",
+        "inUse",
+        "items",
+        "lampCount",
+        "lights",
+        "opts",
+        "reason",
+        "smooth",
+        "MAX_ZIGBEE_LIGHTS",
+        "TWO_BRIDGE_HELP",
+    }
 )
 _SAFE_CALL = re.compile(r"(esc|Number|encodeURIComponent)\(")
 
@@ -36,7 +49,7 @@ def test_server_values_are_escaped_in_html() -> None:
     unsafe = sorted(expression for expression in checked if not _is_safe(expression))
     assert not unsafe, f"Interpolate server values into HTML through esc(): {unsafe}"
     # The scan must have reached the TV cards and skipped plain text and URLs.
-    assert {'esc(tv.devicetype || "TV")', "esc(a.name)"} <= checked
+    assert {"esc(title)", "esc(a.name)"} <= checked
     assert not {"s.host", "encodeURIComponent(tv.username)"} & checked
 
 

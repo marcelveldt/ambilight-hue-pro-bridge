@@ -176,8 +176,6 @@ def _make_zigbee_backend(
     monkeypatch: pytest.MonkeyPatch,
     url: str | None = "ws://core-ziggurat:9999",
     lamps: list[ZigbeeLightRef] = _LAMPS,
-    *,
-    split_gradients: bool = True,
 ) -> ZigbeeBackend:
     monkeypatch.setattr(
         "ambilight_hue_bridge.outbound.backend.ZigbeeEntertainmentSession", _FakeZigbeeSession
@@ -190,11 +188,7 @@ def _make_zigbee_backend(
             ZhaLight(ieee="00:17:88:01:00:00:00:01", nwk=0x1111, name="L"),
         ],
     )
-    return ZigbeeBackend(
-        home_assistant,  # type: ignore[arg-type]
-        lamps,
-        split_gradients=split_gradients,
-    )
+    return ZigbeeBackend(home_assistant, lamps)  # type: ignore[arg-type]
 
 
 def _zigbee_session(backend: ZigbeeBackend) -> _FakeZigbeeSession:
@@ -240,19 +234,6 @@ async def test_zigbee_start_streams_gradient_zones(monkeypatch: pytest.MonkeyPat
         (1, "00:17:88:01:00:00:00:01", 0x1111, 1),
         (2, "00:17:88:01:00:00:00:01", 0x1111, 2),
         (6, "00:17:88:01:0c:bf:17:c8", 0x3333, 0),
-    ]
-
-
-async def test_zigbee_start_without_split_streams_one_channel_per_lamp(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Without split gradients every lamp, gradient or not, streams one colour."""
-    backend = _make_zigbee_backend(monkeypatch, lamps=_GRADIENT_LAMPS, split_gradients=False)
-    await backend.start()
-    session = _zigbee_session(backend)
-    assert [(light.channel_id, light.nwk, light.zone) for light in session.lights] == [
-        (0, 0x1111, 0),
-        (2, 0x3333, 0),
     ]
 
 
