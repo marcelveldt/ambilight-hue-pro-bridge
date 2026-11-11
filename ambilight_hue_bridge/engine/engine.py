@@ -55,8 +55,9 @@ _IDENTIFY_LSELECT_S = 15.0
 _IDENTIFY_BLINK_HZ = 1.5
 _IDENTIFY_RGB = (65535, 65535, 65535)
 # Automatic smoothing for a TV that only pushes v1 REST colors (about once a second), so its
-# abrupt changes become fades; a TV streaming entertainment is smooth already and gets none.
-_REST_SMOOTHING = 0.35
+# abrupt changes become fades of about 0.8 s at 50 Hz; a TV streaming entertainment is smooth
+# already and gets none.
+_REST_SMOOTHING = 0.93
 
 
 class Engine:

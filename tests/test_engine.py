@@ -282,7 +282,7 @@ def test_resolve_smoothing_is_per_tv_else_automatic(tmp_path: Path) -> None:
     """Smoothing resolves to the TV's value; unset, it is on for REST TVs and off once streaming."""
     store = _configured_store(tmp_path)
     engine = Engine(store)
-    assert engine._resolve_smoothing("tv1") == 0.35  # unset, only REST colors so far
+    assert engine._resolve_smoothing("tv1") == 0.93  # unset, only REST colors so far
     engine._fast_tvs.add("tv1")
     assert engine._resolve_smoothing("tv1") == 0.0  # unset, streams entertainment
     store.config.users[0].stream_smoothing = 0.6

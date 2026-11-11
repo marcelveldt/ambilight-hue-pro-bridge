@@ -259,13 +259,12 @@ and does not stream. A freshly paired TV is auto-assigned the active bridge's fi
 assigned area when you (re)set it in the web UI (one virtual light per channel, so each gradient
 zone is its own light). Temporal easing is **per TV** (`stream_smoothing`) — fast DTLS TVs want 0,
 ~1 Hz REST TVs want easing to fill the gaps; unset (`null`), it follows how the TV streams.
-Enabled state and priority are also per TV. Disabled
-TVs may keep a pending virtual activation but never open the outbound session; among TVs on the
-same output, a strictly higher priority active TV preempts the current owner, while the current
-owner wins ties. The advertised `swversion`/`apiversion`/`datastoreversion` and the bridge model
-id live in `const.py`; the HTTP/HTTPS ports are command-line options, not persisted. State fields
-emitted to the TV are strictly int-typed, and every exposed light advertises
-`capabilities.streaming`.
+Enabled state and priority are also per TV. Disabled TVs may keep a pending virtual activation but
+never open the outbound session; among TVs on the same output, a strictly higher priority active TV
+preempts the current owner, while the current owner wins ties. The advertised
+`swversion`/`apiversion`/`datastoreversion` and the bridge model id live in `const.py`; the
+HTTP/HTTPS ports are command-line options, not persisted. State fields emitted to the TV are
+strictly int-typed, and every exposed light advertises `capabilities.streaming`.
 
 ---
 
