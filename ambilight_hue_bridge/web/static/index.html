@@ -216,10 +216,12 @@ function showPairForm() {
 async function pair() {
   const host = document.getElementById("host").value.trim();
   const btn = document.getElementById("pair-btn");
+  if (btn.disabled) return;  // a pairing is still waiting for the link button
   const status = document.getElementById("pair-status");
   status.className = "muted";
   if (!host) { status.textContent = "Enter your Hue bridge's IP address, or click Find bridge."; return; }
-  btn.disabled = true;
+  const buttons = [btn, ...document.querySelectorAll("#discovered button")];
+  for (const b of buttons) b.disabled = true;
   status.textContent = "Press the link button on your Hue bridge now… (30 seconds)";
   try {
     await api("cfg/bridges/pair", {
@@ -238,7 +240,7 @@ async function pair() {
       + "link button within 30 seconds.</span>"
       + `<br><small class="muted">${esc(e.message || e)}</small>`;
   } finally {
-    btn.disabled = false;
+    for (const b of buttons) b.disabled = false;
   }
 }
 
