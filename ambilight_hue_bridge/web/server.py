@@ -323,6 +323,7 @@ class WebServer:
         try:
             found = await discover_bridges()
         except OSError as err:
+            LOGGER.warning("Bridge discovery failed: %s", err)
             return web.json_response({"error": str(err)}, status=502)
         return web.json_response(
             [{"id": bridge.id, "host": bridge.host, "name": bridge.name} for bridge in found],

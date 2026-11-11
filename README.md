@@ -236,8 +236,8 @@ sudo ambilight-hue-bridge --http-port 80 --log-level debug
 
 # then open the web UI at http://<host>:<http-port> (e.g. http://<host>:8080) to pair
 # your Hue bridge (press the link button first). A freshly paired TV is auto-assigned your
-# first entertainment area; reassign it in the UI. A
-# `pair` / `areas` CLI is also available for headless setup.
+# first entertainment area; reassign it in the UI. A `pair` / `areas` CLI is also available
+# for headless setup.
 #
 # log levels: info (lifecycle events) < debug (the TVs' requests) < verbose (SSDP + the web
 # UI's own polling — the firehose). Logs go to the console and a rotating file at

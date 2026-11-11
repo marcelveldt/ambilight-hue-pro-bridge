@@ -604,6 +604,22 @@ async def test_discover_lists_bridges(aiohttp_client, web_setup, monkeypatch) ->
     assert found[0]["id"] == "ABC"
 
 
+async def test_failed_discovery_is_logged(
+    aiohttp_client, web_setup, monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed bridge search answers 502 and logs the reason the UI no longer shows."""
+    app, _store = web_setup
+
+    async def failing_discover() -> list[DiscoveredBridge]:
+        """Fail like a host without a usable network interface."""
+        raise OSError("No usable interface")
+
+    monkeypatch.setattr("ambilight_hue_bridge.web.server.discover_bridges", failing_discover)
+    client = await aiohttp_client(app)
+    assert (await client.get("/cfg/discover")).status == 502
+    assert "Bridge discovery failed: No usable interface" in caplog.text
+
+
 async def test_pair_requires_host(aiohttp_client, web_setup) -> None:
     """Pairing without a host returns a 400."""
     app, _store = web_setup
