@@ -21,7 +21,7 @@ _SAFE_NAMES = frozenset(
         "lights",
         "opts",
         "reason",
-        "smooth",
+        "smoothOpts",
         "MAX_ZIGBEE_LIGHTS",
         "TWO_BRIDGE_HELP",
     }

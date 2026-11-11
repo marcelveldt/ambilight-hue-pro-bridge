@@ -133,6 +133,8 @@
 <script>
 // Mirrors MAX_ZIGBEE_LIGHTS on the server, which also enforces it.
 const MAX_ZIGBEE_LIGHTS = 10;
+// The smoothing choices besides Auto (no stored value): [label, stored smoothing].
+const SMOOTHING_PRESETS = [["Off", 0], ["Light", 0.85], ["Strong", 0.95]];
 const TWO_BRIDGE_HELP =
   "https://github.com/marcelveldt/ambilight-hue-pro-bridge#the-two-bridge-catch-important";
 // The ZHA lamps and Home Assistant connection, loaded on page load and after saving the
@@ -435,7 +437,16 @@ function renderTv(tv, areas, showPriority) {
       + `<div class="hint">When two TVs want the same lights, the higher number gets them.</div>`
       + `</div></div>`
     : "";
-  const smooth = Number(tv.stream_smoothing ?? 0);
+  const smoothing = tv.stream_smoothing;
+  // A stored value that is no preset shows as Custom, and stays until another choice is picked.
+  const custom = smoothing != null && !SMOOTHING_PRESETS.some(([, value]) => value === smoothing)
+    ? `<option value="${Number(smoothing)}" selected>Custom (${esc(Number(smoothing).toFixed(2))})</option>`
+    : "";
+  const smoothOpts = ['<option value="">Auto (recommended)</option>'].concat(
+    SMOOTHING_PRESETS.map(([label, value]) =>
+      `<option value="${Number(value)}"${value === smoothing ? " selected" : ""}>${esc(label)}</option>`),
+    custom,
+  ).join("");
   const paired = formatDate(tv.created);
   card.innerHTML =
     `<div class="row"><input class="name" data-name type="text" value="${esc(title)}" `
@@ -448,11 +459,9 @@ function renderTv(tv, areas, showPriority) {
     + `<details data-advanced${openAdvanced.has(tv.username) ? " open" : ""}><summary>Advanced</summary>`
     + priorityRow
     + `<div class="field"><span class="label">Smoothing</span><div>`
-    + `<div class="row"><span class="muted">Off</span><input data-smooth type="range" min="0" `
-    + `max="0.95" step="0.05" value="${smooth}" aria-label="Smoothing" style="flex:1"/>`
-    + `<span class="muted">Smooth</span></div>`
-    + `<div class="hint">Fades between colours. Leave it off for newer TVs; turn it up for older `
-    + `TVs that update about once a second.</div></div></div>`
+    + `<select data-smooth aria-label="Smoothing">${smoothOpts}</select>`
+    + `<div class="hint">Fades between colours. Auto turns it on for older TVs that update about `
+    + `once a second.</div></div></div>`
     + `<div class="row" style="margin-top:.7rem"><span class="muted">`
     + `${paired ? "Paired " + esc(paired) : ""}</span>`
     + `<span class="spacer"></span><button data-del>Remove TV…</button></div></details>`
@@ -515,14 +524,11 @@ function renderTv(tv, areas, showPriority) {
     };
   }
   const smoothEl = card.querySelector("[data-smooth]");
-  let smoothTimer = null;
-  smoothEl.oninput = () => {
-    // Debounce; PUT smoothing alone so the TV's lights aren't rebuilt.
-    clearTimeout(smoothTimer);
-    smoothTimer = setTimeout(async () => {
-      err.textContent = "";
-      try { await put({ stream_smoothing: Number(smoothEl.value) }); } catch (e) { fail(e); }
-    }, 150);
+  smoothEl.onchange = async () => {
+    err.textContent = "";
+    // PUT smoothing alone so the TV's lights aren't rebuilt.
+    const value = smoothEl.value === "" ? null : Number(smoothEl.value);
+    try { await put({ stream_smoothing: value }); } catch (e) { fail(e); }
   };
   const advanced = card.querySelector("[data-advanced]");
   advanced.addEventListener("toggle", () => {

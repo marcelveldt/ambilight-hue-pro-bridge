@@ -54,6 +54,10 @@ _IDENTIFY_SELECT_S = 2.0
 _IDENTIFY_LSELECT_S = 15.0
 _IDENTIFY_BLINK_HZ = 1.5
 _IDENTIFY_RGB = (65535, 65535, 65535)
+# Automatic smoothing for a TV that only pushes v1 REST colors (about once a second), so its
+# abrupt changes become fades of about 0.8 s at 50 Hz; a TV streaming entertainment is smooth
+# already and gets none.
+_REST_SMOOTHING = 0.93
 
 
 class Engine:
@@ -107,7 +111,9 @@ class Engine:
         """Return the paired usernames that own an active (or opening) outbound stream."""
         return frozenset(slot.owner for slot in self._slots.values() if slot.owner is not None)
 
-    def submit_color(self, owner: str, light_id: str, rgb: tuple[int, int, int]) -> None:
+    def submit_color(
+        self, owner: str, light_id: str, rgb: tuple[int, int, int], *, streamed: bool = False
+    ) -> None:
         """
         Record a color for a virtual light and ensure the stream is running.
 
@@ -117,6 +123,8 @@ class Engine:
             older v1-REST TV pushes colors without first activating an entertainment group.
         :param light_id: The virtual light id the color applies to.
         :param rgb: 16-bit RGB tuple (0-65535 per channel).
+        :param streamed: True for a color from the TV's entertainment (HueStream) stream, which
+            marks the TV as streaming even when it reconnected without activating a group.
         """
         now = time.monotonic()
         # Keep colors isolated because every TV uses the same virtual light ids. A denied TV
@@ -124,6 +132,8 @@ class Engine:
         self._owner_buffers.setdefault(owner, ColorBuffer()).set_color(light_id, rgb)
         self._last_updates[owner] = now
         self._remember_request(owner)
+        if streamed:
+            self._mark_streaming(owner)
         if not self._logged_submit:
             self._logged_submit = True
             LOGGER.info("First inbound color submitted: light=%s rgb=%s", light_id, rgb)
@@ -188,10 +198,7 @@ class Engine:
             return False
         self._last_updates[owner] = time.monotonic()
         self._remember_request(owner)
-        if owner not in self._fast_tvs:
-            self._fast_tvs.add(owner)
-            # A Zigbee stream it runs from REST colors so far takes its lane's full rate now.
-            self._update_zigbee_lanes()
+        self._mark_streaming(owner)
         slot = self._slot_for(owner)
         if slot is None or not self._owner_ready(owner):
             return True
@@ -301,6 +308,13 @@ class Engine:
         self._active_owners.clear()
         self._request_order.clear()
         await asyncio.gather(*(self._stop_slot(slot) for slot in self._slots.values()))
+
+    def _mark_streaming(self, owner: str) -> None:
+        """Remember that a TV streams entertainment, so it gets the rate and smoothing for that."""
+        if owner not in self._fast_tvs:
+            self._fast_tvs.add(owner)
+            # A Zigbee stream it runs from REST colors so far takes its lane's full rate now.
+            self._update_zigbee_lanes()
 
     def _remember_request(self, owner: str) -> None:
         """Track a TV's active stream intent without changing the order on every frame."""
@@ -605,11 +619,11 @@ class Engine:
         await self._teardown(slot)
 
     def _resolve_smoothing(self, owner: str) -> float:
-        """Return a TV's smoothing setting, or 0.0 (off) when it has none."""
+        """Return a TV's smoothing setting, or the automatic one for how it streams when unset."""
         user = paired_user(self._store, owner)
         if user is not None and user.stream_smoothing is not None:
             return user.stream_smoothing
-        return 0.0
+        return 0.0 if owner in self._fast_tvs else _REST_SMOOTHING
 
     def _apply_identify(self, slot: _StreamSlot, owner: str) -> None:
         """Overlay a full-white blink on lights the TV asked to identify; expire finished ones."""

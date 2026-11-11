@@ -35,9 +35,18 @@ class _RecordingEngine:
     def __init__(self, owners: frozenset[str] = frozenset()) -> None:
         self.stream_owners = owners
         self.colors: list[tuple[str | None, str, tuple[int, int, int]]] = []
+        self.streamed: list[bool] = []
 
-    def submit_color(self, owner: str | None, light_id: str, rgb: tuple[int, int, int]) -> None:
+    def submit_color(
+        self,
+        owner: str | None,
+        light_id: str,
+        rgb: tuple[int, int, int],
+        *,
+        streamed: bool = False,
+    ) -> None:
         self.colors.append((owner, light_id, rgb))
+        self.streamed.append(streamed)
 
 
 def _streamer(tmp_path: Path, engine: _RecordingEngine) -> InboundStreamer:
@@ -67,6 +76,7 @@ def test_v1_frame_forwards_each_color_by_light_id(tmp_path: Path, monkeypatch) -
     )
     streamer._on_frame("u1", b"x")
     assert engine.colors == [("u1", "1", (10, 20, 30)), ("u1", "2", (1, 2, 3))]
+    assert engine.streamed == [True, True]  # HueStream colors mark the TV as streaming
 
 
 def test_v2_frame_maps_channel_index_and_drops_out_of_range(tmp_path: Path, monkeypatch) -> None:

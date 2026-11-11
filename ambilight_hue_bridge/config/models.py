@@ -66,8 +66,9 @@ class PairedUser:
     # The ZHA lamps a Zigbee-target TV streams to; the TV sees one light per lamp, or per zone of a
     # gradient lamp. Stored by IEEE address only, as the network address can change.
     zigbee_lights: list[ZigbeeLightRef] = field(default_factory=list)
-    # Per-TV temporal easing (None/0 => off). Fast DTLS-streaming TVs are already smooth and want
-    # 0; the ~1 Hz REST TVs (older models) want easing to fill the gaps between updates.
+    # Per-TV temporal easing (0 => off, None => automatic). Fast DTLS-streaming TVs are already
+    # smooth and want 0; the ~1 Hz REST TVs (older models) want easing to fill the gaps between
+    # updates.
     stream_smoothing: float | None = None
 
 

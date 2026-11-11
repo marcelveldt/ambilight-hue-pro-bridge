@@ -279,15 +279,20 @@ async def test_assign_smoothing_override_does_not_rebuild_lights(aiohttp_client,
     assert store.config.users[0].stream_smoothing == 0.6
 
 
-async def test_tv_smoothing_defaults_to_off(aiohttp_client, web_setup) -> None:
-    """A TV with no smoothing set reports 0 (off) — there is no global default."""
+async def test_tv_smoothing_defaults_to_automatic(aiohttp_client, web_setup) -> None:
+    """A TV with no smoothing set reports null (automatic); setting null goes back to automatic."""
     app, store = web_setup
     store.config.users = [
         PairedUser(username="u1", clientkey="k", devicetype="TV", created="2026-06-11"),
     ]
     client = await aiohttp_client(app)
     tvs = await (await client.get("/cfg/tvs")).json()
-    assert tvs[0]["stream_smoothing"] == 0.0
+    assert tvs[0]["stream_smoothing"] is None
+    await client.put("/cfg/tvs/u1", json={"stream_smoothing": 0.0})
+    assert store.config.users[0].stream_smoothing == 0.0
+    tv = await (await client.put("/cfg/tvs/u1", json={"stream_smoothing": None})).json()
+    assert tv["stream_smoothing"] is None
+    assert store.config.users[0].stream_smoothing is None
 
 
 def test_mirror_labels_gradient_zones_by_position() -> None:

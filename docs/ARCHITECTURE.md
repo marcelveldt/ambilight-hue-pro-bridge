@@ -240,7 +240,7 @@ users:                               # paired TVs; each is assigned an area in t
     stream_priority: 0               # 0..100; higher wins when TVs want the same output
     target: "hue"                    # "hue" (entertainment area) | "zigbee" (ZHA lamps)
     entertainment_area: "<v2 rid>"   # the real-bridge area this TV drives ("" => no lights)
-    stream_smoothing: null           # per-TV temporal easing (null/0 = off, capped at 0.95)
+    stream_smoothing: null           # per-TV temporal easing (null = auto, 0 = off, max 0.95)
     lights:                          # what the TV sees; rebuilt from the area on assignment
       - id: "1"
         name: "Ambilight Left"
@@ -258,13 +258,13 @@ and does not stream. A freshly paired TV is auto-assigned the active bridge's fi
 `cached_areas`, so it works even mid discovery-dance); each TV's `lights` are rebuilt from its
 assigned area when you (re)set it in the web UI (one virtual light per channel, so each gradient
 zone is its own light). Temporal easing is **per TV** (`stream_smoothing`) — fast DTLS TVs want 0,
-~1 Hz REST TVs want easing to fill the gaps. Enabled state and priority are also per TV. Disabled
-TVs may keep a pending virtual activation but never open the outbound session; among TVs on the
-same output, a strictly higher priority active TV preempts the current owner, while the current
-owner wins ties. The advertised `swversion`/`apiversion`/`datastoreversion` and the bridge model
-id live in `const.py`; the HTTP/HTTPS ports are command-line options, not persisted. State fields
-emitted to the TV are strictly int-typed, and every exposed light advertises
-`capabilities.streaming`.
+~1 Hz REST TVs want easing to fill the gaps; unset (`null`), it follows how the TV streams.
+Enabled state and priority are also per TV. Disabled TVs may keep a pending virtual activation but
+never open the outbound session; among TVs on the same output, a strictly higher priority active TV
+preempts the current owner, while the current owner wins ties. The advertised
+`swversion`/`apiversion`/`datastoreversion` and the bridge model id live in `const.py`; the
+HTTP/HTTPS ports are command-line options, not persisted. State fields emitted to the TV are
+strictly int-typed, and every exposed light advertises `capabilities.streaming`.
 
 ---
 

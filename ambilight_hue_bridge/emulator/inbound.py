@@ -110,7 +110,7 @@ class InboundStreamer:
         for color in frame.colors:
             light_id = _resolve_light(is_v2=frame.is_v2, target=color.target, lights=lights)
             if light_id is not None:
-                self._engine.submit_color(identity, light_id, color.rgb)
+                self._engine.submit_color(identity, light_id, color.rgb, streamed=True)
 
 
 def _resolve_light(*, is_v2: bool, target: int, lights: list[VirtualLight]) -> str | None:
