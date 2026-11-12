@@ -6,10 +6,15 @@ import logging
 from typing import TYPE_CHECKING
 
 import pytest
-from hue_entertainment import LightColorCommand
+from hue_entertainment import LightColorCommand, LightsBusyError
 
 from ambilight_hue_bridge.config.models import RealBridge, ZigbeeLightRef
-from ambilight_hue_bridge.outbound.backend import BackendHealth, HueBridgeBackend, ZigbeeBackend
+from ambilight_hue_bridge.outbound.backend import (
+    BackendHealth,
+    HueBridgeBackend,
+    OutputBusyError,
+    ZigbeeBackend,
+)
 from ambilight_hue_bridge.outbound.homeassistant import HomeAssistantError, ZhaLight
 
 if TYPE_CHECKING:
@@ -253,6 +258,21 @@ async def test_zigbee_start_without_ziggurat_raises(monkeypatch: pytest.MonkeyPa
     with pytest.raises(HomeAssistantError, match="Ziggurat"):
         await backend.start()
     assert backend._session is None
+
+
+async def test_zigbee_start_on_busy_lamps_raises_busy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lamps another app streams to make the start fail as busy, naming the lamps."""
+
+    class _BusySession(_FakeZigbeeSession):
+        async def start(self) -> None:
+            raise LightsBusyError(["Left"])
+
+    backend = _make_zigbee_backend(monkeypatch)
+    monkeypatch.setattr(
+        "ambilight_hue_bridge.outbound.backend.ZigbeeEntertainmentSession", _BusySession
+    )
+    with pytest.raises(OutputBusyError, match="Another client streams to Left"):
+        await backend.start()
 
 
 async def test_zigbee_backend_wraps_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
