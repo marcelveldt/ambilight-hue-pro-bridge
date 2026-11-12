@@ -32,7 +32,8 @@ configured from the web UI. The add-on has a few options on its **Configuration*
 **Zigbee lights (no Hue bridge):** if Home Assistant's ZHA runs on a Ziggurat radio, a TV can stream
 straight to up to 10 Hue colour lamps on that Zigbee network. Pick them per TV in the web UI; the
 add-on reaches Home Assistant on its own, and the lamps return to their previous state when streaming
-stops.
+stops. While another app (such as Music Assistant's Hue Lights Sync) streams to one of the lamps, the
+TV waits and tries again every minute.
 
 The bridge runs with **host networking** (required for SSDP/mDNS discovery and for the virtual
 bridge to appear on the LAN), so it binds the host's `http_port`. Make sure nothing else on the
