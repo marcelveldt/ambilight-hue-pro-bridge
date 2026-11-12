@@ -3,7 +3,7 @@ version: "0.7.0"
 slug: ambilight_hue_pro_bridge
 description: >-
   Bridge older Philips Ambilight+Hue TVs to a modern Philips Hue (V2/Pro) bridge
-  over the low-latency Entertainment API.
+  over the low-latency Entertainment API, or straight to Hue lamps in ZHA.
 url: https://github.com/marcelveldt/ambilight-hue-pro-bridge
 # Prebuilt multi-arch image published to GHCR on each release; Home Assistant pulls
 # <image>:<version> and Docker selects the matching architecture from the manifest.

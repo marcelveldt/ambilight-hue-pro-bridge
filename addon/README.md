@@ -2,25 +2,25 @@
 
 Bridge older Philips **Ambilight+Hue** TVs to a modern Philips Hue (V2 or **Pro**) bridge.
 
-Philips dropped Ambilight+Hue support from the Hue Pro bridge. This add-on presents a *virtual*
+Philips dropped Ambilight+Hue support from the Hue Pro bridge. This app presents a *virtual*
 Hue bridge on your LAN that the TV connects to (older models over SSDP + the legacy v1 REST API,
 newer Android models over mDNS + inbound DTLS), then forwards the colours to your real bridge
-over the low-latency Entertainment API.
+over the low-latency Entertainment API, or straight to Hue lamps in Home Assistant's ZHA.
 
 ## Installation
 
-1. In Home Assistant, go to **Settings → Add-ons → Add-on Store**.
+1. In Home Assistant, go to **Settings → Apps → Install app**.
 2. Open the **⋮** menu (top right) → **Repositories**, and add:
    `https://github.com/marcelveldt/ambilight-hue-pro-bridge`
-3. Install the **Ambilight+Hue Pro Bridge** add-on and start it.
-4. Open the web UI with **Open Web UI** on the add-on page or the **Ambilight Bridge** sidebar
+3. Install the **Ambilight+Hue Pro Bridge** app and start it.
+4. Open the web UI with **Open Web UI** on the app page or the **Ambilight Bridge** sidebar
    entry (ingress). Pair your real Hue bridge and assign each TV an entertainment area, enabled
    state, and stream priority.
 
 ## Configuration
 
 The Hue bridge itself (real bridge pairing, per-TV areas, enabled state, and stream priority) is
-configured from the web UI. The add-on has a few options on its **Configuration** tab:
+configured from the web UI. The app has a few options on its **Configuration** tab:
 
 - **`http_port`** (default `80`) — the port the Hue API is served on. Ambilight TVs assume `80`;
   only change it if something else on the host needs that port.
@@ -31,7 +31,7 @@ configured from the web UI. The add-on has a few options on its **Configuration*
 
 **Zigbee lights (no Hue bridge):** if Home Assistant's ZHA runs on a Ziggurat radio, a TV can stream
 straight to up to 10 Hue colour lamps on that Zigbee network. Pick them per TV in the web UI; the
-add-on reaches Home Assistant on its own, and the lamps return to their previous state when streaming
+app reaches Home Assistant on its own, and the lamps return to their previous state when streaming
 stops. While another app (such as Music Assistant's Hue Lights Sync) streams to one of the lamps, the
 TV waits and tries again every minute.
 
@@ -40,7 +40,7 @@ bridge to appear on the LAN), so it binds the host's `http_port`. Make sure noth
 host already uses it. On that port the LAN only gets the Hue API the TVs use; the web UI answers
 only Home Assistant.
 
-State (your bridge credentials and the rotating log) is stored in the add-on's persistent
+State (your bridge credentials and the rotating log) is stored in the app's persistent
 `/data`, so it survives restarts and updates.
 
 ## Connecting a TV
@@ -48,14 +48,14 @@ State (your bridge credentials and the rotating log) is stored in the add-on's p
 Your real Hue bridge advertises `_hue._tcp` over **mDNS** just like this virtual one, so a newer
 Ambilight TV can discover the *real* bridge and connect to it instead — and since the Hue Bridge Pro
 dropped Ambilight+Hue support, it then sits there doing nothing. A TV is sticky once locked, but
-re-discovers whenever it loses its bridge, so this recurs whenever the add-on restarts
+re-discovers whenever it loses its bridge, so this recurs whenever the app restarts
 (updates/reboots) while the real bridge is reachable. The collision is purely **local** (mDNS on
 your own network, *not* Philips' cloud), so blocking `discovery.meethue.com` does not help.
 
-**Durable fix:** stop the TV from *discovering* the real bridge while the add-on still reaches it by
-IP. Put the real bridge (or the TV) on its own VLAN / isolated subnet the add-on's host can still
+**Durable fix:** stop the TV from *discovering* the real bridge while the app still reaches it by
+IP. Put the real bridge (or the TV) on its own VLAN / isolated subnet the app's host can still
 route to — the clean fix, if your router does VLANs or client isolation. (A guest network won't do:
-its isolation is symmetric and would cut the add-on off too. Without VLANs, mDNS is link-local
+its isolation is symmetric and would cut the app off too. Without VLANs, mDNS is link-local
 multicast on a flat LAN and never reaches the router, so nothing can filter it — use the manual step
 below and unplug the real bridge during updates.)
 

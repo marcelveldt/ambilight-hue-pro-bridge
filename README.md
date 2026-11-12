@@ -1,14 +1,16 @@
 # Ambilight+Hue Pro Bridge
 
 Bridge older Philips **Ambilight+Hue** TVs to modern Philips Hue bridges — including
-the new **Hue Pro bridge** — over the low-latency **Entertainment API**, with support
-for **multi-zone / gradient lights**.
+the new **Hue Pro bridge** — over the low-latency **Entertainment API**, or straight to Hue
+lamps in Home Assistant's **ZHA** without any Hue bridge, with support for **multi-zone /
+gradient lights**.
 
 > **Status:** working and in real use. Discovery (SSDP + mDNS), pairing, the v1 REST API, the
 > web UI, per-TV configuration, and the outbound + inbound Entertainment streaming are all
 > implemented and verified live against both an older (2018) and a newer (2022, Android)
-> Ambilight TV. Packaged as a multi-arch Docker image (published to GHCR on every release) and
-> as a Home Assistant add-on (see [Installation](#installation)).
+> Ambilight TV, on a Hue Pro bridge and on Hue lamps in ZHA. Packaged as a multi-arch Docker
+> image (published to GHCR on every release) and as a Home Assistant app (see
+> [Installation](#installation)).
 
 ## Why this exists
 
@@ -18,11 +20,12 @@ for that legacy protocol and instead requires a separate **Hue Sync box** — wh
 cost and forces your video sources through that box's HDMI inputs.
 
 This project restores Ambilight+Hue for those TVs against any modern Hue bridge, and
-adds two things the original feature never had:
+adds what the original feature never had:
 
-- it works with the **Pro bridge** (and the square V2 bridge), and
+- it works with the **Pro bridge** (and the square V2 bridge),
 - it can map a single **gradient / multi-zone** light strip into multiple addressable
-  zones for a far richer Ambilight effect.
+  zones for a far richer Ambilight effect, and
+- it can drive Hue lamps in Home Assistant's ZHA directly, with no Hue bridge at all.
 
 ## How it works
 
@@ -48,13 +51,15 @@ The app sits on your LAN between the TV and your real Hue bridge:
    expose (including gradient strips split into multiple virtual lights).
 2. When Ambilight runs, the TV streams light updates to the virtual bridge.
 3. A **mapping engine** translates those updates onto the channels of an
-   **entertainment area** on your real bridge.
-4. An **entertainment client** streams the result to the real bridge over DTLS for
-   minimal latency.
+   **entertainment area** on your real bridge, or onto the Zigbee lamps you chose.
+4. An **entertainment client** streams the result to the real bridge over DTLS, or to the
+   lamps through ZHA's Ziggurat server, for minimal latency.
 
 ## Connecting a TV
 
-Pair your real Hue bridge in the web UI first, then run the **Ambilight+Hue** setup on the TV.
+Pair your real Hue bridge in the web UI first (skip this when the TV only uses
+[Zigbee lamps](#zigbee-lights-without-a-hue-bridge)), then run the **Ambilight+Hue** setup on the
+TV. The TV then shows up in the web UI, where you choose which lights it controls.
 
 ### The two-bridge catch (important)
 
@@ -98,7 +103,7 @@ Hue colour lamps on that Zigbee network, with no Hue bridge involved:
    three per gradient lamp (a Signe or gradient lightstrip); place them around the screen in the
    TV's Ambilight+Hue menu.
 
-As a Home Assistant add-on the connection to Home Assistant is automatic. Otherwise enter your Home
+As a Home Assistant app the connection to Home Assistant is automatic. Otherwise enter your Home
 Assistant URL and a long-lived access token of an administrator under **Home Assistant connection**
 in the web UI.
 
@@ -116,7 +121,8 @@ Assistant's Hue Lights Sync) streams to one of the lamps, the TV waits and tries
 
 - 🪟 Web interface for configuration
 - 🧩 KISS, robust, low-resource always-on background service (cheap when idle)
-- 📺 Per-TV setup — area, smoothing, enabled state, and stream priority
+- 📺 Per-TV setup — lights (an entertainment area or Zigbee lamps), smoothing, enabled state,
+  and stream priority
 - 🔀 Priority arbitration — a higher-priority TV takes over a shared output (one stream per Hue
   bridge); TVs on separate outputs stream side by side
 - 🌈 Map a gradient / multi-zone light into multiple addressable virtual lights
@@ -140,9 +146,10 @@ The service is built from a few focused, decoupled components:
   library (pure-Python DTLS 1.2 PSK + `HueStream` encoder, *"working and tested on Hue
   Bridge V2 and Hue Bridge Pro"*). For the Zigbee lights target the same library streams
   straight onto ZHA's Ziggurat server instead.
-- **Web UI + config store** — pair the real bridge, then assign each paired TV an
-  entertainment area (each zone of a gradient strip becomes its own virtual light). New TVs
-  default to your first area; until a bridge is paired a TV has no lights and doesn't stream.
+- **Web UI + config store** — pair the real bridge and/or connect Home Assistant, then give
+  each paired TV an entertainment area or Zigbee lamps (each zone of a gradient light becomes
+  its own virtual light). New TVs default to your first area; a TV without lights doesn't
+  stream.
 
 > Detailed protocol notes and the module map live in
 > [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -152,9 +159,11 @@ The service is built from a few focused, decoupled components:
 Because the service answers SSDP/mDNS multicast and presents a virtual bridge on the LAN, it
 must run with **host networking** whichever way you deploy it.
 
-### Home Assistant add-on
+### Home Assistant app
 
-Add this repository to **Settings → Add-ons → Add-on Store → ⋮ → Repositories**:
+[![Add the repository to your Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fmarcelveldt%2Fambilight-hue-pro-bridge)
+
+Or add this repository by hand under **Settings → Apps → Install app → ⋮ → Repositories**:
 
 ```
 https://github.com/marcelveldt/ambilight-hue-pro-bridge
@@ -165,13 +174,17 @@ Then install **Ambilight+Hue Pro Bridge** and open its web UI from the HA sideba
 
 ### Per-TV control from Home Assistant
 
-Each TV card has an **Enabled** switch and, under **Advanced** once two or more TVs are paired, a
-**Priority** from 0 to 100. Priority settles which TV streams when several want the same output: the
-Hue bridge (one stream at a time), or Zigbee (two streams, the higher-priority one at the full rate;
-never two on the same lamp). Higher values win; the current TV keeps the stream on a tie. A
-higher-priority request closes the current entertainment session before opening the new TV's area. A
-disabled TV stays connected to the virtual bridge but cannot stream to the real bridge; enabling it
-starts its pending request unless a higher-priority TV is active on its output.
+Each TV card has an **Enabled** switch. Under **Advanced**, **Smoothing** fades between colours:
+**Auto** (the default) turns it on for older TVs that update about once a second and off for TVs
+that stream, while **Off**, **Light** and **Strong** set it by hand.
+
+Once two or more TVs are paired, **Advanced** also has a **Priority** from 0 to 100. Priority
+settles which TV streams when several want the same output: the Hue bridge (one stream at a time),
+or Zigbee (two streams, the higher-priority one at the full rate; never two on the same lamp).
+Higher values win; the current TV keeps the stream on a tie. A higher-priority request closes the
+current stream before opening the new TV's. A disabled TV stays connected to the virtual bridge but
+does not stream; enabling it starts its pending request unless a higher-priority TV is active on
+its output.
 
 The same settings have a JSON API for a Home Assistant REST command or REST sensor:
 
@@ -182,13 +195,14 @@ curl http://<bridge-host>:80/cfg/tvs
 # Read one TV (suitable for a REST sensor's value_json.enabled).
 curl http://<bridge-host>:80/cfg/tvs/<username>
 
-# Change either or both settings.
+# Change one or more settings.
 curl -X PUT http://<bridge-host>:80/cfg/tvs/<username> \
   -H 'Content-Type: application/json' \
   -d '{"enabled": false, "stream_priority": 25}'
 ```
 
-The response is the updated TV object. As a Home Assistant add-on, the web UI and `/cfg` API
+`stream_smoothing` takes `null` for Auto, or a value from 0 (off) to 0.95. The response is the
+updated TV object. As a Home Assistant app, the web UI and `/cfg` API
 answer only the Home Assistant sidebar and the Home Assistant host itself: use `127.0.0.1` or
 `localhost` as `<bridge-host>` in a REST command or sensor (Home Assistant shares the host's
 network). Calls through the host's LAN address or from other devices get a 403. Run standalone, they have no
@@ -271,12 +285,13 @@ Implemented and working end-to-end:
 - **Engine** — per-TV light/area mapping, gradient-zone split, per-TV temporal smoothing, one
   stream per output with priority arbitration/preemption, enablement, light identify (blink), and
   idle teardown.
-- **Web UI** — bridge pairing, per-TV area assignment, smoothing, enablement/priority, and removal.
+- **Web UI** — bridge pairing, the Home Assistant connection, per-TV lights (an entertainment
+  area or Zigbee lamps), smoothing, enablement/priority, and removal.
 - **Packaging** — a multi-arch (amd64/arm64) Docker image published to GHCR on every release,
-  and a Home Assistant add-on wrapping it.
+  and a Home Assistant app wrapping it.
 
 Verified live against an older (2018) and a newer (2022, Android) Ambilight TV, streaming to a
-Hue Pro bridge.
+Hue Pro bridge and to Hue lamps in ZHA.
 
 Planned: continued verification of the TV wire protocol across more models.
 
