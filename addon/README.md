@@ -18,8 +18,8 @@ This app takes the place of the old Hue bridge these TVs need, and passes their 
 
 ## Zigbee lamps
 
-- Tick up to 10 Hue colour lamps per TV. Pick lamps close to each other, such as the lamps in one
-  room.
+- Tick up to 10 Hue colour lamps per TV. Only lamps that support entertainment are listed. Pick
+  lamps close to each other, such as the lamps in one room.
 - The lamps go back to how they were when the TV stops.
 - When another app (such as Music Assistant's Hue Lights Sync) uses one of the lamps, the TV waits
   and tries again every minute.

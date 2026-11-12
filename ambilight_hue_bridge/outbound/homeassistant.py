@@ -22,6 +22,9 @@ _SUPERVISOR_WEBSOCKET_URL = "ws://supervisor/core/websocket"
 _TIMEOUT_S = 10.0
 _HUE_MANUFACTURERS = ("signify", "philips")
 _COLOR_MODES = frozenset({"xy", "hs", "rgb", "rgbw", "rgbww"})
+# Only Hue lamps with Hue's entertainment cluster (on endpoint 11) can be streamed to.
+_ENTERTAINMENT_ENDPOINT = "11"
+_ENTERTAINMENT_CLUSTER = "0xfc01"
 
 
 class HomeAssistantError(Exception):
@@ -62,7 +65,7 @@ class HomeAssistantClient:
 
     async def hue_lights(self) -> list[ZhaLight]:
         """
-        Return the Hue color lights in ZHA, sorted by area and name.
+        Return the Hue color lights in ZHA that support entertainment, sorted by area and name.
 
         :raises HomeAssistantError: When Home Assistant or ZHA is unavailable.
         """
@@ -82,6 +85,8 @@ class HomeAssistantClient:
         for device in devices:
             manufacturer = str(device.get("manufacturer") or "").lower()
             if not any(name in manufacturer for name in _HUE_MANUFACTURERS):
+                continue
+            if not _has_entertainment_cluster(device):
                 continue
             if not any(
                 entity.get("entity_id") in color_lights for entity in device.get("entities") or ()
@@ -183,6 +188,13 @@ def _ziggurat_path(settings: Any) -> str | None:
     if isinstance(path, str) and path.startswith(("ws://", "wss://")):
         return path
     return None
+
+
+def _has_entertainment_cluster(device: dict[str, Any]) -> bool:
+    """Return whether a ZHA device has Hue's entertainment cluster, as zha/devices reports it."""
+    endpoints = (device.get("signature") or {}).get("endpoints") or {}
+    clusters = (endpoints.get(_ENTERTAINMENT_ENDPOINT) or {}).get("input_clusters") or ()
+    return _ENTERTAINMENT_CLUSTER in {str(cluster).lower() for cluster in clusters}
 
 
 def _parse_nwk(value: Any) -> int | None:

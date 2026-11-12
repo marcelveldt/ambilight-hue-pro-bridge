@@ -35,6 +35,7 @@ def _device(
     name: str = "Signify Netherlands B.V. LCT015",
     user_given_name: str | None = None,
     area_id: str | None = "living",
+    entertainment: bool = True,
 ) -> dict[str, Any]:
     """Build a ZHA device as zha/devices reports it."""
     return {
@@ -46,6 +47,14 @@ def _device(
         "user_given_name": user_given_name,
         "area_id": area_id,
         "entities": [{"entity_id": entity_id, "name": name}],
+        "signature": {
+            "endpoints": {
+                "11": {
+                    "input_clusters": ["0x0000", "0x0006", "0x0300"]
+                    + (["0xFC01"] if entertainment else []),
+                },
+            },
+        },
     }
 
 
@@ -75,6 +84,8 @@ _RESULTS: dict[str, Any] = {
             name="Philips LCA001",
             area_id="den",
         ),
+        # A Hue color lamp without the entertainment cluster.
+        _device("00:17:88:01:00:00:00:06", 7, "light.old", entertainment=False),
         # A Hue white-ambiance lamp: no color mode.
         _device("00:17:88:01:00:00:00:03", 3, "light.hall"),
         # A color lamp from another brand.
@@ -85,6 +96,7 @@ _RESULTS: dict[str, Any] = {
     "get_states": [
         _state("light.couch", "color_temp", "xy"),
         _state("light.tv", "hs"),
+        _state("light.old", "xy"),
         _state("light.hall", "color_temp"),
         _state("light.ikea", "xy"),
         _state("sensor.dimmer_battery"),
@@ -155,7 +167,7 @@ def _client(tmp_path: Path, url: str, token: str = _TOKEN) -> HomeAssistantClien
 
 
 async def test_hue_lights_keeps_only_hue_color_lights(tmp_path: Path, fake_ha) -> None:
-    """Only Signify/Philips lamps with a color-capable light entity are listed, with areas."""
+    """Only Signify/Philips color lamps with the entertainment cluster are listed, with areas."""
     fake, url = fake_ha
     lights = await _client(tmp_path, url).hue_lights()
     assert lights == [
