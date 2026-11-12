@@ -96,7 +96,8 @@ Each TV has its own card with an **Enabled** switch. Under **Advanced**:
 
 A Hue bridge streams to one TV at a time. TVs on different lights stream side by side, except that
 Zigbee carries at most two streams: the TV with the highest priority at 25 frames a second, the
-next at a lower rate.
+next at 10. An older TV gets at most 5 frames a second (the lamps fade in between), which leaves
+the full rate to the other stream.
 
 ## Control from Home Assistant
 
