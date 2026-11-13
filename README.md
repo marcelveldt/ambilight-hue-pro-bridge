@@ -8,7 +8,7 @@ place and passes the TV's colours on to your lights, wherever they are:
 | Your Hue lights are on | What you need |
 |---|---|
 | A **Hue bridge**, the square V2 or the new Pro | An entertainment area in the Hue app |
-| **Zigbee in Home Assistant**, no Hue bridge at all | ZHA running on [Ziggurat](https://github.com/zigpy/ziggurat) |
+| **Zigbee in Home Assistant**, no Hue bridge at all | ZHA running on [Ziggurat](https://github.com/zigpy/ziggurat), and Hue colour lamps that support entertainment |
 
 Gradient lights (a Signe or a gradient lightstrip) show a colour per zone, and several TVs can each
 have their own lights.
@@ -60,7 +60,8 @@ where the TV looks for a Hue bridge. Settings are kept in `/data`.
   run elsewhere, enter Home Assistant's address and the long-lived access token of an administrator
   under **Home Assistant connection**.
 - On the TV's card, set **Lights** to **Zigbee lamps (Home Assistant)** and tick up to 10 Hue colour
-  lamps. A gradient lamp shows up on the TV as three lights.
+  lamps. Only lamps that support entertainment are listed; older Hue lamps without it can't be
+  streamed to. A gradient lamp shows up on the TV as three lights.
 - Pick lamps close to each other, such as the lamps in one room: one of them passes the colours on to
   the others.
 - The lamps go back to how they were when the TV stops.

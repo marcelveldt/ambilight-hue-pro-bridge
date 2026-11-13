@@ -369,7 +369,7 @@ function renderZigbeeLamps(tv) {
       + `</label>`;
   }).join("");
   const empty = zigbee.available
-    ? `<span class="muted">No Hue colour lamps found in Home Assistant's Zigbee (ZHA).</span>`
+    ? `<span class="muted">No Hue colour lamps that support entertainment found in Home Assistant's Zigbee (ZHA).</span>`
     : "";
   const reason = zigbee.available ? "" : `<span class="error">${esc(zigbee.reason)}</span>`;
   return `<div class="field"><span class="label">Lamps (pick up to ${MAX_ZIGBEE_LIGHTS})</span>`
