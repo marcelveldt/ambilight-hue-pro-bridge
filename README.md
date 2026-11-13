@@ -109,7 +109,8 @@ A Zigbee TV streams at the same time as a TV on the Hue bridge. All Zigbee strea
 network's airtime, so ZHA carries at most two: the TV with the highest stream priority at 25 frames
 a second, the next one at a lower rate. An older TV that updates its colours about once a second
 gets at most 5 frames a second, and the lamps fade in between. A third Zigbee TV, or one that shares
-a lamp with a streaming TV, takes turns by stream priority.
+a lamp with a streaming TV, takes turns by stream priority. While another app (such as Music
+Assistant's Hue Lights Sync) streams to one of the lamps, the TV waits and tries again every minute.
 
 ## Features
 

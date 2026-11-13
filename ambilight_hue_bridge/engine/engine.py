@@ -11,7 +11,12 @@ from typing import TYPE_CHECKING
 
 from ambilight_hue_bridge.config.models import StreamTarget
 from ambilight_hue_bridge.const import MAX_STREAM_SMOOTHING
-from ambilight_hue_bridge.outbound.backend import BackendHealth, HueBridgeBackend, ZigbeeBackend
+from ambilight_hue_bridge.outbound.backend import (
+    BackendHealth,
+    HueBridgeBackend,
+    OutputBusyError,
+    ZigbeeBackend,
+)
 from ambilight_hue_bridge.outbound.controller import active_bridge, paired_user, tv_stream_target
 from ambilight_hue_bridge.outbound.homeassistant import HomeAssistantClient
 
@@ -32,8 +37,9 @@ IDLE_TIMEOUT_S = 10.0
 # this many consecutive polls, tear the stream down so the next inbound frame re-establishes it.
 _HEALTH_POLL_S = 5.0
 _HEALTH_FAILS_TO_RECOVER = 2
-# After another controller takes the area over, wait this long before re-grabbing it, so we don't
-# fight a deliberate Hue-app / Sync-box stream on every frame.
+# After another controller takes the area over, or already streams to the lamps at start, wait
+# this long before re-grabbing them, so we don't fight a deliberate Hue-app / Sync-box stream on
+# every frame.
 _FOREIGN_BACKOFF_S = 60.0
 # After a failed start, wait this long before the next attempt instead of retrying on every frame.
 _START_RETRY_BACKOFF_S = 3.0
@@ -686,9 +692,19 @@ class Engine:
             with suppress(Exception):
                 await slot.wait_for_close()
             raise
-        except Exception:
-            LOGGER.exception("Failed to start outbound stream to %s", target)
-            slot.regrab_block_until = time.monotonic() + _START_RETRY_BACKOFF_S
+        except Exception as err:
+            if isinstance(err, OutputBusyError):
+                LOGGER.warning(
+                    "Not starting outbound stream to %s: %s; backing off %.0fs",
+                    target,
+                    err,
+                    _FOREIGN_BACKOFF_S,
+                )
+                backoff = _FOREIGN_BACKOFF_S
+            else:
+                LOGGER.exception("Failed to start outbound stream to %s", target)
+                backoff = _START_RETRY_BACKOFF_S
+            slot.regrab_block_until = time.monotonic() + backoff
             with suppress(Exception):
                 await backend.aclose()
             if slot.owner == owner:

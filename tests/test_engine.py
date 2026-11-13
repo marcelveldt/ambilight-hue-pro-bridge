@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from contextlib import suppress
 from typing import TYPE_CHECKING
@@ -18,12 +19,19 @@ from ambilight_hue_bridge.config.store import ConfigStore
 from ambilight_hue_bridge.engine.engine import Engine, _resource_key
 from ambilight_hue_bridge.engine.ingest import ColorBuffer
 from ambilight_hue_bridge.engine.mapping import map_to_commands
-from ambilight_hue_bridge.outbound.backend import BackendHealth, HueBridgeBackend, ZigbeeBackend
+from ambilight_hue_bridge.outbound.backend import (
+    BackendHealth,
+    HueBridgeBackend,
+    OutputBusyError,
+    ZigbeeBackend,
+)
 from ambilight_hue_bridge.outbound.controller import lights_from_zigbee
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    import pytest
 
     from ambilight_hue_bridge.engine.engine import _StreamSlot
 
@@ -872,6 +880,39 @@ async def test_failed_start_backs_off_before_retrying(tmp_path: Path, monkeypatc
     await asyncio.sleep(0.3)
     engine.submit_color("tv1", "1", (65535, 0, 0))
     assert await _wait_until(lambda: len(starts) == 2)
+    await engine.stop()
+
+
+async def test_busy_lamps_back_off_like_a_takeover(
+    tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A start refused because another app streams to the lamps waits the takeover back-off."""
+    closed: list[bool] = []
+
+    class _BusyBackend(_ScriptedBackend):
+        async def start(self) -> None:
+            msg = "Another client streams to Lamp"
+            raise OutputBusyError(msg)
+
+        async def aclose(self) -> None:
+            await super().aclose()
+            closed.append(True)
+
+    monkeypatch.setattr(Engine, "_create_backend", lambda _self, _user: (_BusyBackend([]), "x"))
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine._FOREIGN_BACKOFF_S", 30.0)
+    monkeypatch.setattr("ambilight_hue_bridge.engine.engine._START_RETRY_BACKOFF_S", 0.3)
+    engine = Engine(_configured_store(tmp_path), rate_hz=100)
+    with caplog.at_level(logging.WARNING):
+        engine.submit_color("tv1", "1", (65535, 0, 0))
+        assert await _wait_until(lambda: bool(closed))
+    slot = _slot(engine)
+    assert 25.0 < slot.regrab_block_until - time.monotonic() <= 30.0
+    assert slot.owner is None
+    assert not engine.stream_owners
+    [record] = [r for r in caplog.records if r.name == "ambilight_hue_bridge.engine.engine"]
+    assert record.levelno == logging.WARNING
+    assert "Another client streams to Lamp" in record.getMessage()
+    assert record.exc_info is None
     await engine.stop()
 
 

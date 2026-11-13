@@ -7,7 +7,12 @@ import time
 from enum import StrEnum, auto
 from typing import TYPE_CHECKING, Protocol
 
-from hue_entertainment import EntertainmentSession, ZigbeeEntertainmentSession, ZigbeeLight
+from hue_entertainment import (
+    EntertainmentSession,
+    LightsBusyError,
+    ZigbeeEntertainmentSession,
+    ZigbeeLight,
+)
 
 from .controller import zigbee_channels
 from .homeassistant import HomeAssistantError
@@ -40,6 +45,10 @@ class BackendHealth(StrEnum):
     TAKEN_OVER = auto()
 
 
+class OutputBusyError(Exception):
+    """Another controller streams to the target, so a stream cannot start until it is free."""
+
+
 class OutputBackend(Protocol):
     """An outbound stream to one light target, opened on demand by the engine."""
 
@@ -48,7 +57,11 @@ class OutputBackend(Protocol):
         """Return True while the stream is active."""
 
     async def start(self) -> None:
-        """Open the stream; raises when it cannot be established."""
+        """
+        Open the stream; raises when it cannot be established.
+
+        :raises OutputBusyError: When another controller streams to the target.
+        """
 
     def send(self, commands: list[LightColorCommand]) -> None:
         """
@@ -181,6 +194,7 @@ class ZigbeeBackend:
         :raises HomeAssistantError: When ZHA is unavailable, not on Ziggurat, or has none of the
             lamps.
         :raises ZigguratError: When the Ziggurat server can't be reached.
+        :raises OutputBusyError: When another app streams to one of the lamps.
         """
         # The network address can change (a lamp rejoining), so resolve it fresh on every start.
         url, addresses = await self._home_assistant.stream_info()
@@ -205,7 +219,10 @@ class ZigbeeBackend:
         self._session = ZigbeeEntertainmentSession(
             url, lights, idle_timeout=0.0, max_rate_hz=self._max_rate_hz
         )
-        await self._session.start()
+        try:
+            await self._session.start()
+        except LightsBusyError as err:
+            raise OutputBusyError(str(err)) from err
 
     def send(self, commands: list[LightColorCommand]) -> None:
         """
